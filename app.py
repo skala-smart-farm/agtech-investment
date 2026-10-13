@@ -227,7 +227,8 @@ def main(argv: list[str] | None = None) -> None:
     run_log["orchestration"] = "supervisor" if args.supervisor else "sequential"
     if args.supervisor:
         run_log["supervisor"] = {"reviews": state.get("supervisor_reviews", {}),
-                                 "final_review": state.get("supervisor_final_review", {})}
+                                 "final_review": state.get("supervisor_final_review", {}),
+                                 "excluded": state.get("supervisor_excluded", [])}
     _write_json(f"{out_dir}/run_log.json", run_log)
     cost = TRACKER.summary()
     if cost.get("api_calls"):
@@ -238,7 +239,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"== 완료 ({elapsed}초, 종료 사유 {state.get('end_reason')}, LLM {cost}) ==")
 
     report = state.get("report") or {}
-    if mode == "calibrate" and state.get("end_reason") != "insufficient_evidence":
+    if mode == "calibrate":
         run_log["calibration"] = finish_calibration(state, cfg, run_date)
         _write_json(f"{out_dir}/run_log.json", run_log)
     elif report.get("submit_pdf") or report.get("pdf"):
@@ -247,8 +248,6 @@ def main(argv: list[str] | None = None) -> None:
             print(f"검증: {json.dumps(report['checks'], ensure_ascii=False)}")
     else:
         print(f"보고서를 만들지 못했습니다. {out_dir}/run_log.json 을 확인하세요.")
-    if state.get("end_reason") == "insufficient_evidence":
-        raise SystemExit(2)  # 근거 부족을 성공 실행으로 처리하거나 보정 기준을 갱신하지 않는다.
 
 
 if __name__ == "__main__":

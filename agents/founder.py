@@ -16,6 +16,7 @@ from agents.tech import CITE_ID, candidate_line, evidence_blocks, judge_own
 from core.config import get_segment, run_date
 from core.llm_bounded import bounded
 from core.prompts import render
+from core.recency import recent_months
 from tools.fetch import enrich
 from tools.grounding import norm
 from tools.sources import SourceRegistry
@@ -254,7 +255,7 @@ def _analysis_text(c: dict, f: dict) -> str:
         f"[창업 시점 t0] {f['t0'] or '확인 불가'} — {f['t0_source']}{years}",
         f"[팀] {f['team_assessment']}",
         f"[창업자·핵심 인력] {people or '확인 불가'}",
-        f"[마일스톤] {stones or '없음'} (최근 24개월 {f['milestones_24m']}건)",
+        f"[마일스톤] {stones or '없음'} (최근 {recent_months()}개월 {f['milestones_recent']}건)",
         f"[고용] {_nps_line(c.get('nps') or {})}",
     ])
 
@@ -267,7 +268,7 @@ def founder_node(state: dict) -> dict:
         't0': str|None, 't0_basis': str, 't0_source': str, 't0_evidence_ids': [...],   # 창업 시점과 그 근거
         'years_since_t0': float|None,                                           # t0 → 평가 기준일 경과 연수
         'people': [{'name','role','background','before_t0': bool|None,'evidence_ids'}],
-        'milestones': [{'date': 'YYYY-MM','what','evidence_ids'}], 'milestones_24m': int,
+        'milestones': [{'date': 'YYYY-MM','what','evidence_ids'}], 'milestones_recent': int,
         'headcount': int|None, 'hires_per_year': float|None, 'team_assessment': str,
         'evidence_ids': [...], 'pool_ids': [...],                               # pool_ids: 판정에 쓰는 근거 id
         'criterion': DimResult,                                                 # core.judge.judge_dimension('founder', …)
@@ -322,7 +323,7 @@ def founder_node(state: dict) -> dict:
     headcount = nps.get("members") if nps.get("status") == "matched" else None
     out = {
         **t0, "years_since_t0": years, "people": people, "milestones": milestones,
-        "milestones_24m": sum(0 <= months_between(m["date"], until) <= 24 for m in milestones),
+        "milestones_recent": sum(0 <= months_between(m["date"], until) <= recent_months() for m in milestones),
         "headcount": headcount,
         "hires_per_year": round(headcount / max(years, 0.5), 1) if headcount is not None and years is not None else None,
         "team_assessment": res.team_assessment,
@@ -335,7 +336,7 @@ def founder_node(state: dict) -> dict:
     crit = out["criterion"]
     who = ", ".join(f"{p['name']}({p['role']})" for p in people) or "없음"
     msg = (f"[창업자] {name}: t0 {out['t0'] or '확인 불가'}({t0['t0_basis']}), 인물 {len(people)}명({who})"
-           f"{' — 재시도' if retried else ''}, 마일스톤 {len(milestones)}건(최근 24개월 {out['milestones_24m']}건), "
+           f"{' — 재시도' if retried else ''}, 마일스톤 {len(milestones)}건(최근 {recent_months()}개월 {out['milestones_recent']}건), "
            f"근거 {len(out['evidence_ids'])}건 → 창업자 YES {crit['yes']}/{crit['n']}")
     print(msg)
     return {"registry": reg.data, "founder": out, "log": [msg]}

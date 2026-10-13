@@ -2,6 +2,7 @@
 
 domain:
   name: AgTech
+  name_ko: 애그테크                     # 한국어 검색어·문서 검색 질문에 쓰는 분야 이름
   description: "AI·센서·로봇으로 작물 재배, 병해충 진단, 수확, 축산 등 농업 생산성을 높이는 기술"
   region_priority: [KR, GLOBAL]        # 같은 순번이면 국내 먼저
   # 세부 분야: 발굴 쿼리와 시장 분석 단위 (ko: 한국어 검색어, en: 영문 검색어)
@@ -11,6 +12,52 @@ domain:
     - {id: robotics, name: "농업 로봇·자율주행 농기계", ko: "농업 로봇", en: "agricultural robotics autonomous tractor"}
     - {id: livestock, name: "축산 AI(가축 건강·사양 관리)", ko: "축산 AI", en: "livestock AI health monitoring"}
     - {id: agdata, name: "농업 생산 데이터 분석·예측 AI (생육·환경 데이터)", ko: "농업 데이터 플랫폼", en: "agriculture data platform AI"}
+  # 적격성 관문 G5: LLM 이 주력 분야를 하나 고르고, target 에 있는 분야만 통과
+  sectors:
+    options:
+      crop: "작물 재배·시설원예·병해충·수확"
+      livestock: "축산·가축 사양 관리"
+      aquaculture: "수산 양식"
+      distribution: "농산물 유통·중개·거래 플랫폼"
+      food: "식품 가공·배달"
+      other: "그 밖의 산업"
+    target: [crop, livestock]
+  # 발굴 고정 검색어 (세부 분야별 검색어는 segments 의 ko·en 으로 만든다)
+  discovery_queries:
+    round1:
+      - {channel: B.공공프로그램, query: "TIPS 선정 애그테크 스마트팜 AI 스타트업", topic: general, recent: false}
+      - {channel: B.공공프로그램, query: "농식품 벤처육성 선정 AI 애그테크 스타트업", topic: general, recent: false}
+      - {channel: B.공공프로그램, query: "이달의 A-벤처스 선정 농식품 AI 기업", topic: general, recent: false}
+      - {channel: B.공공프로그램, query: "스마트농업 우수기업 선정 AI 스타트업", topic: news}
+      - {channel: C.스타트업DB, query: "스마트팜 AI 스타트업 투자 단계", topic: general, recent: false, include_domains: [thevc.kr, innoforest.co.kr]}
+      - {channel: C.스타트업DB, query: "농업 로봇 축산 AI 스타트업", topic: general, recent: false, include_domains: [thevc.kr, innoforest.co.kr]}
+      - {channel: D.수상전시, query: "CES 혁신상 애그테크 한국 스타트업 AI", topic: news}
+      - {channel: F.해외투자뉴스, query: "AI agtech startup raises Series A", topic: news}
+      - {channel: F.해외투자뉴스, query: "agricultural robotics startup raises seed funding", topic: news}
+    round2:
+      - {channel: B.공공프로그램, query: "스마트팜 혁신밸리 입주 스타트업 AI", topic: general, recent: false}
+  # 시장 분석 하위 질문이 3개 미만일 때 채우는 기본 질문 ({seg}: 세부 분야 이름, {prev}: 기준 연도 − 1)
+  market_default_questions:
+    - {question: "국내 스마트농업·스마트팜 시장 규모 (기관별 추정치, 기준 연도)", purpose: 시장 규모}
+    - {question: "{seg} 글로벌 시장 규모와 연평균 성장률 (2024년 이후 발표)", purpose: 성장률}
+    - {question: "애그테크 벤처 투자 동향 ({prev}년 투자액 증감, 국가별 증감)", purpose: 투자 동향}
+  # 기술 에이전트 회사별 검색어 ({name}: 회사 이름, deep: 본문까지 받기)
+  tech_queries:
+    ko:
+      - {query: "{name} 특허 등록 기술", deep: false}
+      - {query: "{name} 실증 농가 효과 수확량 절감", deep: true}
+      - {query: "{name} 매출 고객 농가 수 설치", deep: true}
+      - {query: "{name} 협약 계약 공급 농협 지자체 수출", deep: false}
+    en:
+      - {query: "{name} patent", deep: false}
+      - {query: "{name} field trial results yield savings", deep: true}
+      - {query: "{name} revenue customers farms deployed", deep: true}
+      - {query: "{name} partnership contract distribution", deep: false}
+  keywords: [농업, 농산, 농작물, 작물, 재배, 스마트팜, 스마트 팜, 수직농장, 식물공장, 병해충, 병충해, 축산, 가축, 양돈, 양계, 낙농,
+             한우, 수확, 농기계, 농장, 과수, 온실, 시설원예, 육묘, 애그, agri, agtech, farm, crop, livestock]   # TIPS 목록에서 분야 기업을 고르는 단어
+  customer_names: [농협, 영농조합, 농업회사법인]   # 상용 운영 판정에서 고객 이름으로 인정하는 표현
+  non_company_words: [농가, 농업, 작물, 딸기, 토마토, 오이, 파프리카, 과일, 채소, 농장, 온실, 스마트팜]   # 경쟁사 이름으로 오인하기 쉬운 분야 단어
+  wowtale_category: 19425              # 와우테일 '애그테크' 카테고리 id
 
 models:
   generator: gpt-4.1-mini              # 분석·보고서 작성
@@ -49,6 +96,9 @@ rag:
   context_doc_chars: 1200              # 답변 생성·점검에 넘기는 문서 조각 최대 글자 수
   context_web_chars: 800               # 답변 생성·점검에 넘기는 웹 스니펫 최대 글자 수
   allow_direct_answer: false           # 검색 없이 바로 답하는 경로 (수치 환각 방지로 끔)
+
+recency:
+  months: 24                           # '최근' 근거로 인정하는 기간 (평가 기준일 − N개월 ~ 기준일)
 
 tools:
   summarize_max_chars: 6000            # 문서 요약 도구에 넣는 원문 최대 글자 수
@@ -114,7 +164,9 @@ report:
   run_cost_usd: 0.6                    # 1회 실행 LLM 비용 (참고용)
 
 supervisor:
-  max_reworks_per_candidate: 2          # 근거 부족이면 최대 2회 재조사. 소진해도 부족하면 보고서 승인 없이 중단
+  max_reworks_per_candidate: 2          # 근거 부족이면 최대 2회 재조사. 소진해도 부족하면 그 후보는 제외
+  context_summary_chars: 1800          # 충분성 검토에 넘기는 관점별 분석 요약 최대 글자 수
+  context_source_chars: 900            # 충분성 검토에 넘기는 근거 원문 최대 글자 수
 
 cache:
   dir: replay                          # 캐시 폴더 (--fresh 면 cache_fresh/)

@@ -20,8 +20,7 @@ from tools.listing_check import normalize
 
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/128.0 Safari/537.36"}
-AGRI = re.compile(r"농업|농산|농작물|작물|재배|스마트팜|스마트 팜|수직농장|식물공장|병해충|병충해|축산|가축|양돈|양계|낙농|"
-                  r"한우|수확|농기계|농장|과수|온실|시설원예|육묘|애그|agri|agtech|farm|crop|livestock", re.I)
+AGRI = re.compile("|".join(map(re.escape, get_config().domain.keywords)), re.I)  # 분야 기업을 고르는 단어
 AI = re.compile(r"AI|인공지능|머신러닝|딥러닝|컴퓨터 ?비전|로봇|자율주행|드론|센서|IoT|데이터", re.I)
 FUNDING = re.compile(r"투자\s?유치|시드|프리\s?A|시리즈|브릿지|팁스|TIPS", re.I)
 
@@ -88,8 +87,8 @@ def tips_profile(names: list[str]) -> dict | None:
     return None
 
 
-def wowtale_agtech_funding(since_days: int = 730) -> list[dict]:
-    """와우테일 애그테크 카테고리의 투자 유치 기사 (최근 2년)."""
+def wowtale_agtech_funding(since_days: int | None = None) -> list[dict]:
+    """와우테일 애그테크 카테고리의 투자 유치 기사 (최근 기간)."""
     f = _snapshot("wowtale_agtech")
     if f.exists():
         posts = json.loads(f.read_text(encoding="utf-8"))
@@ -98,7 +97,7 @@ def wowtale_agtech_funding(since_days: int = 730) -> list[dict]:
         try:
             while True:
                 r = requests.get("https://wowtale.net/wp-json/wp/v2/posts",
-                                 params={"categories": 19425, "per_page": 100, "page": page,
+                                 params={"categories": get_config().domain.wowtale_category, "per_page": 100, "page": page,
                                          "_fields": "date,link,title"}, headers=UA, timeout=30)
                 if r.status_code != 200:
                     break
@@ -112,7 +111,9 @@ def wowtale_agtech_funding(since_days: int = 730) -> list[dict]:
             return []
         f.write_text(json.dumps(posts, ensure_ascii=False), encoding="utf-8")
     from core.config import run_date
+    from core.recency import recent_days
 
+    since_days = since_days or recent_days()
     out, now = [], datetime.strptime(run_date(), "%Y-%m-%d")
     for p in posts:
         title = html.unescape(p["title"]["rendered"])

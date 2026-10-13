@@ -13,7 +13,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from core import judge
-from core.config import get_segment, run_date
+from core.config import get_config, get_segment, run_date
 from core.llm_bounded import bounded
 from core.prompts import render
 from rag import agentic_rag as rag
@@ -38,13 +38,9 @@ HOMEPAGE_FOCUS = "핵심 기술·제품·장점과 단점"
 
 def tech_queries(c: dict) -> list[tuple[str, bool]]:
     """기술·제품 검색 쿼리 (쿼리, deep)."""
-    name = c["official_name"]
-    if c["region"] == "KR":
-        return [(f"{name} 특허 등록 기술", False), (f"{name} 실증 농가 효과 수확량 절감", True),
-                (f"{name} 매출 고객 농가 수 설치", True), (f"{name} 협약 계약 공급 농협 지자체 수출", False)]
-    q = c.get("name_en") or name
-    return [(f"{q} patent", False), (f"{q} field trial results yield savings", True),
-            (f"{q} revenue customers farms deployed", True), (f"{q} partnership contract distribution", False)]
+    kr = c["region"] == "KR"
+    name = c["official_name"] if kr else (c.get("name_en") or c["official_name"])
+    return [(t["query"].format(name=name), t["deep"]) for t in get_config().domain.tech_queries["ko" if kr else "en"]]
 
 
 def _covered(passage: str, skip: str) -> bool:

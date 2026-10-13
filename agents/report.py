@@ -23,6 +23,7 @@ from core.config import ROOT, get_config, get_segment, path
 from core.judge import company_keys
 from core.llm_bounded import bounded
 from core.prompts import render
+from core.recency import recent_months
 from report.render import MAX_DENSITY, html_to_pdf, render_html
 from tools import web_search as search_tool
 from tools.grounding import norm
@@ -87,8 +88,8 @@ DEMOTED = {"인용문이 근거 본문에서 확인되지 않음": "근거 원�
            "인용 주변": "근거가 이 회사가 아닌 업계 일반 내용임",
            "공공·연구기관 문서 근거 없음": "공공·연구기관 문서 근거 없음",
            "회사 자체 발표만 있음": "회사 자체 발표만 있고 제3자 근거 없음",
-           "최근 24개월 이내 근거 아님": "최근 24개월 이내 근거 없음",
-           "언급된 사건 날짜가 모두": "언급된 사건이 모두 24개월보다 오래됨",
+           "개월 이내 근거 아님": "최근 기간 이내 근거 없음",
+           "언급된 사건 날짜가 모두": "언급된 사건이 모두 최근 기간보다 오래됨",
            "인용 속 사건 날짜가 평가 기준일 이후": "언급된 사건이 아직 일어나지 않음(예정)",
            "인용이 예정·계획·목표 문장": "예정·계획이며 완료된 사건이 아님"}
 
@@ -217,7 +218,8 @@ def _pool(state: dict, evals: list[dict], screened: list[dict], cfg) -> dict:
     discovered = sum(counts) if counts else (len(raw) if rounds == 1 and raw else None)
     disc_split = split(raw) if rounds == 1 and raw and discovered == len(raw) else (None, None)
     eligible = [r for r in screened if r.get("eligible")]
-    done = [n for e in evals for n in _names(e)]
+    excluded = state.get("supervisor_excluded") or []  # Supervisor 재조사 후에도 근거 부족으로 제외한 후보
+    done = [n for e in evals for n in _names(e)] + [x["candidate"] for x in excluded]
     left = [r for r in eligible if not any(_same(r.get("official_name") or r["name"], n) or _same(r["name"], n)
                                            for n in done)]
     capped = state.get("end_reason") == "max_evaluations" or len(evals) >= cfg.workflow.max_evaluations
@@ -237,6 +239,7 @@ def _pool(state: dict, evals: list[dict], screened: list[dict], cfg) -> dict:
                                                    for e in evals]),
         "unevaluated": [{"name": r.get("official_name") or r["name"], "stage": r.get("stage") or "-",
                          "search_failed": bool(r.get("gate_search_failed"))} for r in left],
+        "excluded": excluded,
         "why": why, "capped": capped, "per_round": cfg.workflow.max_candidates_per_round,
         "ref_gap": _reference_gap(evals) if evals else None,
     }
@@ -262,7 +265,7 @@ def _pool_rows(p: dict) -> list[list]:
 
 def _funnel(pool: dict) -> str:
     disc = f"{pool['discovered']}곳 발굴 → " if pool.get("discovered") else ""
-    return f"국내외 AgTech AI 스타트업 {disc}적격성 관문 통과 {pool['eligible']}곳(모두 Seed~Series C 투자 유치 확인)"
+    return f"국내외 {get_config().domain.name} AI 스타트업 {disc}적격성 관문 통과 {pool['eligible']}곳(모두 Seed~Series C 투자 유치 확인)"
 
 
 def _hold_counts(evals: list[dict]) -> str:
@@ -732,12 +735,14 @@ def _limitations(cfg, pool: dict, failed_by: dict[str, int], data_limits: list[s
                    f"{'·'.join(u['name'] for u in pool['unevaluated'])})"
                    + (f" — '투자 추천 없음'은 평가한 {pool['evaluated']}곳에 대한 결론이다" if mode == "hold"
                       else f" — 투자 추천 대상은 평가한 {pool['evaluated']}곳 중에서 골랐다" if pool["evaluated"] > 1 else ""))
+    if ex := pool.get("excluded"):
+        out.append(f"적격 후보 {len(ex)}곳({'·'.join(x['candidate'] for x in ex)})은 재조사 후에도 근거가 부족해 평가에서 제외했다")
     if mode != "none":
         out.append("동종 기준 집단 평균 대비 상대 평가라 기준 집단 전체의 질이 낮으면 상대적으로 나은 기업이 추천될 수 있다"
                    f"{_reference_mix()}. 관문(실제 투자 유치 확인)·창업자 기준(동종 평균 이상) 요건·Deal-killer·실사 조건으로 보완한다")
         out.append("ROI 는 환율·지분율·회수 배수 가정에 따른 참고치이며 점수와 결정에 넣지 않았다")
     out += data_limits[:1]
-    out.append(f"문항 판정은 {cfg.models.judge} 가 하고, 코드는 인용이 원문에 있는지·제3자·최근 24개월·상용 운영 요건만 검사한다"
+    out.append(f"문항 판정은 {cfg.models.judge} 가 하고, 코드는 인용이 원문에 있는지·제3자·최근 {recent_months()}개월·상용 운영 요건만 검사한다"
                " (근거 해석 오류는 남을 수 있음)")
     access = [f"{ACCESS_DATE_NOTE}({len(access_dates)}건, 조회일 {', '.join(sorted(set(access_dates)))})"] if access_dates else []
     return out[:6] + access
@@ -890,11 +895,11 @@ def _team_blocks(target: dict, d: dict, reg: SourceRegistry, detail: bool) -> li
     nps = _nps_line(prof)
     years = f.get("years_since_t0")
     hires = f.get("hires_per_year")
-    blocks = [_table(["창업 시점 t0", "t0 근거", "경과", "고용(국민연금)", "최근 24개월 마일스톤"],
+    blocks = [_table(["창업 시점 t0", "t0 근거", "경과", "고용(국민연금)", f"최근 {recent_months()}개월 마일스톤"],
                      [[t0 or "확인 불가", (f.get("t0_source") or "-") + _cite(reg, t0_ids, 1),
                        f"{_num(years)}년" if years else "-",
                        (nps + (f", 창업 후 연평균 {_num(hires)}명(가입자 ÷ 경과 연수)" if hires else "")) if nps else "-",
-                       f"{f.get('milestones_24m', 0)}건"]], ["16%", "22%", "9%", "33%", "20%"], small=True)]
+                       f"{f.get('milestones_recent', 0)}건"]], ["16%", "22%", "9%", "33%", "20%"], small=True)]
     people = [[x.get("name") or "-", x.get("role") or "-",
                {True: "창업 전 · ", False: "창업 후 · "}.get(x.get("before_t0"), "") + (_about(x.get("background"), reg, keys) or "경력 확인 불가")
                + (_cite_about(reg, x.get("evidence_ids"), keys, 2) if not CITE.search(x.get("background") or "") else "")]
@@ -1263,7 +1268,7 @@ def report_node(state: dict) -> dict:
         situation = f"{_funnel(pool)} → {len(evals)}곳 평가(국내 {pool['ev_split'][0]}·해외 {pool['ev_split'][1]})"
         request = (f"{target['name']} 실사 착수 또는 미평가 적격 {len(un)}곳 추가 평가를 승인할까요?" if un
                    else f"{target['name']} 실사 착수를 승인할까요?")
-        title = f"AgTech AI 스타트업 투자 검토 — 투자 추천 없음 (평가 {len(evals)}곳 모두 보류)"
+        title = f"{cfg.domain.name} AI 스타트업 투자 검토 — 투자 추천 없음 (평가 {len(evals)}곳 모두 보류)"
         badge = "투자 추천 없음"
         expect = lambda c: (c.startswith("투자 추천 없음") and all(e["decision"] == "보류" for e in evals)  # noqa: E731
                             and f"평가한 {len(evals)}곳 모두 보류" in c)
@@ -1353,18 +1358,33 @@ def _no_candidate_report(state: dict, cfg, screened: list[dict], reg: SourceRegi
         key = re.sub(r"^G\d(?:/G\d)?\s*", "", (r.get("reason") or "-")).split("(")[0].split(":")[0].split(" — ")[0][:30].strip()
         reasons[key] = reasons.get(key, 0) + 1
     disc = f"{pool['discovered']}곳을 발굴해 " if pool.get("discovered") else ""
+    excluded = pool["excluded"]
+    if excluded:  # 적격 후보는 있었지만 재조사 후에도 근거가 부족해 모두 제외
+        what, n_ok = "근거 충분 후보 없음", f"적격 {pool['eligible']}곳 · 근거 부족 제외 {len(excluded)}곳"
+        situation = (f"국내외 {cfg.domain.name} AI 스타트업 {disc}{len(screened)}곳 중 적격 {pool['eligible']}곳을 찾았으나, "
+                     f"평가한 {len(excluded)}곳 모두 재조사 후에도 투자 판단에 필요한 근거가 부족했다")
+        basis = "제외 사유 " + "; ".join(f"{x['candidate']} — {x['reason'][:60]}" for x in excluded) + "(→1장)"
+        lead = f"적격 후보 {len(excluded)}곳은 근거 부족으로 제외했고, 나머지는 관문을 통과하지 못했다."
+        rows = ([[x["candidate"], "-", f"근거 부족으로 제외: {x['reason']}"] for x in excluded]
+                + [[r.get("official_name") or r["name"], r.get("stage") or "-", r.get("reason") or "-"]
+                   for r in screened if not r.get("eligible")])
+    else:
+        what, n_ok = "적격 후보 없음", "적격 후보 0곳"
+        situation = (f"국내외 {cfg.domain.name} AI 스타트업 {disc}{len(screened)}곳을 적격성 관문(비상장·Seed~Series C·Exit 전)으로 "
+                     "검증했으나 통과한 곳이 없다")
+        basis = "탈락 사유 " + (", ".join(f"{k} {v}곳" for k, v in reasons.items()) or "-") + "(→1장)"
+        lead = f"검증한 {len(screened)}곳 모두 과제 기준(비상장·Seed~Series C·Exit 전)을 충족하지 못했다."
+        rows = [[r.get("official_name") or r["name"], r.get("stage") or "-", r.get("reason") or "-"] for r in screened]
     view = {
-        "title": "AgTech AI 스타트업 투자 검토 — 적격 후보 없음", "badge": "투자 추천 없음", "mode": "none",
-        "meta": f"{cfg.domain.name} · 적격 후보 0곳 · 작성일 {run_date}", "run_date": run_date,
-        "summary": [("상황", f"국내외 AgTech AI 스타트업 {disc}{len(screened)}곳을 적격성 관문(비상장·Seed~Series C·Exit 전)으로 "
-                            "검증했으나 통과한 곳이 없다"),
-                    ("결론", "투자 추천 대상 없음 — 적격 후보 0곳"),
-                    ("근거", "탈락 사유 " + (", ".join(f"{k} {v}곳" for k, v in reasons.items()) or "-") + "(→1장)"),
+        "title": f"{cfg.domain.name} AI 스타트업 투자 검토 — {what}", "badge": "투자 추천 없음", "mode": "none",
+        "meta": f"{cfg.domain.name} · {n_ok} · 작성일 {run_date}", "run_date": run_date,
+        "summary": [("상황", situation),
+                    ("결론", f"투자 추천 대상 없음 — {n_ok}"),
+                    ("근거", basis),
                     ("요청", "발굴 채널·세부 분야를 넓혀 다시 탐색할까요?")],
         "chapters": [
-            {"title": C_CHAPTERS[1], "lead": f"검증한 {len(screened)}곳 모두 과제 기준(비상장·Seed~Series C·Exit 전)을 충족하지 못했다.",
-             "blocks": [_table(["후보", "단계", "관문 판정"], [[r.get("official_name") or r["name"], r.get("stage") or "-",
-                                                               r.get("reason") or "-"] for r in screened], ["22%", "12%", "66%"])]},
+            {"title": C_CHAPTERS[1], "lead": lead,
+             "blocks": [_table(["후보", "단계", "관문 판정"], rows, ["22%", "12%", "66%"])]},
             {"title": C_CHAPTERS[2], "lead": "공개 정보로 투자 단계를 확인하지 못한 후보는 보수적으로 제외했다.",
              "blocks": [_ul(_limitations(cfg, pool, {}, [], "none", []))]},
         ],
@@ -1378,4 +1398,4 @@ def _no_candidate_report(state: dict, cfg, screened: list[dict], reg: SourceRegi
                      cfg.report.summary_max_chars)
     checks |= {"density_level": 0, "rewrites": 0, "references": len(refs),
                "reference_groups": {g["name"]: len(g["items"]) for g in numbered["ref_groups"]}}
-    return _finish(numbered, md, result, cfg, checks, "none", cited, view["title"], None, "적격 후보 없음")
+    return _finish(numbered, md, result, cfg, checks, "none", cited, view["title"], None, what)

@@ -5,7 +5,7 @@ LLM 은 문항별 판정(YES/NO/UNKNOWN/N/A)·근거 id·원문 인용만 답하
 - 기준별로 따로 호출하고, 점수·기준점을 LLM 에 보여 주지 않는다
 - YES·NO 는 인용문이 실제 근거 본문에 있어야 인정한다 ("근거가 없다"는 NO 가 아니라 UNKNOWN)
 - 인용 앞뒤 300자 안에 회사명이 있어야 한다 (시장 문항 M1·M2 제외)
-- 제3자 근거·최근 24개월·문서 근거·상용 운영 요건은 코드가 검사한다
+- 제3자 근거·최근 기간·문서 근거·상용 운영 요건은 코드가 검사한다
 - D1(최근 라운드)은 적격성 관문에서 검증한 값으로 코드가 판정한다
 """
 from __future__ import annotations
@@ -19,10 +19,10 @@ import yaml
 from pydantic import BaseModel, Field
 from rank_bm25 import BM25Okapi
 
-from core.config import ROOT
+from core.config import ROOT, get_config
 from core.llm_bounded import bounded
 from core.prompts import render
-from core.recency import future_round, only_future_events, planned_only
+from core.recency import future_round, only_future_events, planned_only, recent_days, recent_months
 from rag.index import kiwi_tokenize
 from rag.loader import load_manifest
 from tools.grounding import fuzzy_in, norm
@@ -39,7 +39,7 @@ COMPANY_VOICE_EN = re.compile(r"\b(said|says|plans to|aims to|according to the c
 # 상용 운영 문항: 예정·실증 단계를 뜻하는 표현
 PLANNED = re.compile(r"상용화를기점|상용화예정|출시예정|목표|실증|poc|proofofconcept|시범|(?<!auto)pilot")
 # 상용 운영 문항 YES 요건: 수량이나 고객 이름
-SCALE = re.compile(r"\d|농협|영농조합|농업회사법인")
+SCALE = re.compile("|".join([r"\d", *map(re.escape, get_config().domain.customer_names)]))
 SCALE_WORD = re.compile(r"(?<![가-힣])(한|두|세|네|다섯|여섯|일곱|여덟|아홉|수십|수백|수천)\s*(곳|개소|농가|농장|마리)")
 # NO 이유에 이런 말이 있으면 근거 부족
 NO_HEDGE = re.compile(r"추정|불분명|명확하지않|확인되지않|없어|없으므로|근거가없")
@@ -211,7 +211,7 @@ def _is_recent(s: dict, run_date: str) -> bool:
     if s["kind"] == "doc" or s.get("id", "").startswith("D"):  # 문서는 발행 연도로 판단
         year = _doc_years().get(s.get("doc_id")) or s.get("year")
         try:
-            return int(run_date[:4]) - 2 <= int(year) <= int(run_date[:4])
+            return int(run_date[:4]) - recent_months() // 12 <= int(year) <= int(run_date[:4])
         except (TypeError, ValueError):
             return False
     if s["kind"] == "web" and s.get("site") in DB_SITES:
@@ -223,20 +223,20 @@ def _is_recent(s: dict, run_date: str) -> bool:
         days = (datetime.strptime(run_date, "%Y-%m-%d").date() - date.fromisoformat(d)).days
     except ValueError:
         return False
-    return 0 <= days <= 730
+    return 0 <= days <= recent_days()
 
 
 def _events_too_old(text: str, run_date: str) -> bool:
-    """문장 속 사건 날짜가 모두 24개월보다 오래됐으면 True. 날짜가 없으면 False."""
+    """문장 속 사건 날짜가 모두 최근 기간보다 오래됐으면 True. 날짜가 없으면 False."""
     run = datetime.strptime(run_date, "%Y-%m-%d")
     months = [(int(y), int(m)) for y, m in re.findall(r"(20\d{2})\s*[년.\-/]\s*(\d{1,2})", text) if 1 <= int(m) <= 12]
     if not months:
         return False
-    return all((run.year - y) * 12 + (run.month - m) > 24 for y, m in months)
+    return all((run.year - y) * 12 + (run.month - m) > recent_months() for y, m in months)
 
 
 def _round_rule(c: dict, run_date: str) -> tuple[str, list[str], str]:
-    """D1: 최근 24개월 라운드의 단계·금액·시점. 적격성 검증 단계에서 원문 인용으로 확인된 값만 쓴다."""
+    """D1: 최근 기간 안 라운드의 단계·금액·시점. 적격성 검증 단계에서 원문 인용으로 확인된 값만 쓴다."""
     ids, rd, amount = c.get("stage_evidence_ids") or [], str(c.get("round_date") or ""), str(c.get("round_amount") or "")
     m = re.match(r"(20\d{2})(?:-(\d{1,2}))?", rd)
     if not ids or not m:
@@ -246,8 +246,8 @@ def _round_rule(c: dict, run_date: str) -> tuple[str, list[str], str]:
     months = (run.year - y) * 12 + (run.month - mo)
     if why := future_round(c, run_date):
         return "UNKNOWN", [], f"{why} (코드 판정)"
-    if months > 24:
-        return "NO", ids, f"최근 라운드가 {rd} 로 24개월보다 오래됨 (코드 판정)"
+    if months > recent_months():
+        return "NO", ids, f"최근 라운드가 {rd} 로 {recent_months()}개월보다 오래됨 (코드 판정)"
     # 금액은 숫자가 있고 '비공개' 류 표현이 없을 때만 확인
     if not re.search(r"\d", amount) or any(u in amount.lower() for u in UNDISCLOSED):
         return "UNKNOWN", [], f"{rd} {c.get('stage')} 라운드 금액 비공개{f' ({amount})' if amount else ''} (코드 판정)"
@@ -284,7 +284,7 @@ def judge_dimension(dim_id: str, company: dict, pool_ids: list[str], reg: Source
         judge = bounded(Answers, "judge")
 
         def ask(questions: str) -> Answers:
-            return judge.invoke(render("decision", dimension=d["name"], questions=questions, run_date=run_date,
+            return judge.invoke(render("decision", dimension=d["name"], questions=questions, run_date=run_date, recent_months=recent_months(),
                                        analysis=analysis, evidence=evidence))
 
         got = {a.qid: a for a in ask(_qlines(d["questions"])).answers}
@@ -333,9 +333,9 @@ def judge_dimension(dim_id: str, company: dict, pool_ids: list[str], reg: Source
             elif q.get("commercial") and not _has_scale(a.quote, keys):
                 fail = "상용 규모 근거 없음 (인용에 설치 수·면적·두수·고객명이 없음)"
             elif q.get("recent") and not any(_is_recent(reg.get(i), run_date) for i in ev):
-                fail = "최근 24개월 이내 근거 아님"
+                fail = f"최근 {recent_months()}개월 이내 근거 아님"
             elif q.get("recent") and not q.get("market_level") and _events_too_old(f"{a.quote} {a.rationale}", run_date):
-                fail = "언급된 사건 날짜가 모두 평가 기준일로부터 24개월보다 오래됨 (코드 날짜 검사)"
+                fail = f"언급된 사건 날짜가 모두 평가 기준일로부터 {recent_months()}개월보다 오래됨 (코드 날짜 검사)"
             elif q.get("recent") and not q.get("market_level") and only_future_events(a.quote, run_date):
                 fail = "인용 속 사건 날짜가 평가 기준일 이후(예정)뿐 (코드 날짜 검사)"
             elif q.get("recent") and not q.get("market_level") and planned_only(a.quote, run_date):

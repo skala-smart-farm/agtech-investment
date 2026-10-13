@@ -1,11 +1,22 @@
-"""최근성 규칙 ('최근 24개월'의 정의). 판정·탐색 관문·발굴 채널이 함께 쓴다.
+"""최근성 규칙. 판정·탐색 관문·발굴 채널이 함께 쓴다.
 
-- 최근 N개월 = [평가 기준일 − N개월, 평가 기준일]. 기준일 이후 날짜(예정·계획)는 최근으로 인정하지 않는다.
+- 최근 N개월(config recency.months) = [평가 기준일 − N개월, 평가 기준일]. 기준일 이후 날짜(예정·계획)는 최근으로 인정하지 않는다.
 - 날짜는 적힌 정밀도(연·월)로만 비교하고, 읽지 못하면 판단하지 않는다.
 """
 from __future__ import annotations
 
 import re
+
+from core.config import get_config
+
+
+def recent_months() -> int:
+    """'최근'으로 인정하는 기간(개월)."""
+    return int(get_config().recency.months)
+
+
+def recent_days() -> int:
+    return recent_months() * 365 // 12
 
 # 라운드 시점·마일스톤 날짜 필드: 'YYYY', 'YYYY-MM', 'YYYY.MM', 'YYYY년 M월'
 _FIELD = re.compile(r"((?:19|20)\d{2})(?:\s*[-./년]\s*(\d{1,2}))?")
@@ -67,8 +78,9 @@ def is_future(when, run_date: str) -> bool:
     return p is not None and _after(*p, run_date)
 
 
-def in_window(y: int, mo: int | None, run_date: str, months: int = 24) -> bool:
+def in_window(y: int, mo: int | None, run_date: str, months: int | None = None) -> bool:
     """(연, 월 | None) 이 [평가 기준일 − months 개월, 평가 기준일] 안인가. 연도만 있으면 기준 연도 − months/12 ~ 기준 연도."""
+    months = months or recent_months()
     if _after(y, mo, run_date):
         return False
     ry, rm = int(run_date[:4]), int(run_date[5:7])
@@ -90,7 +102,7 @@ def text_dates(text: str) -> list[tuple[int, int | None]]:
     return out
 
 
-def only_future_events(text: str, run_date: str, months: int = 24) -> bool:
+def only_future_events(text: str, run_date: str, months: int | None = None) -> bool:
     """문장 속 날짜가 기준일 이후뿐이면 True (최근 사건 근거가 아님)."""
     dates = text_dates(text)
     future = [d for d in dates if _after(*d, run_date)]
@@ -114,7 +126,7 @@ def future_round(record: dict, run_date: str) -> str | None:
     return None
 
 
-def planned_only(text: str, run_date: str, months: int = 24) -> bool:
+def planned_only(text: str, run_date: str, months: int | None = None) -> bool:
     """예정·계획·목표 문장인데 완료 표지도, 창(최근 months 개월) 안의 사건 날짜도 없으면 True (완료된 사건이 아님)."""
     return (bool(PLANNED.search(text or "")) and not DONE.search(text or "")
             and not any(in_window(*d, run_date, months) for d in text_dates(text)))

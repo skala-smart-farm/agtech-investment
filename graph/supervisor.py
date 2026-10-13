@@ -1,4 +1,4 @@
-"""START → supervisor ⇄ 각 에이전트 → report / 근거 부족 중단 → END."""
+"""START → supervisor ⇄ 각 에이전트 → report → END. 근거가 부족한 후보는 제외하고 다음 후보로."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -10,6 +10,8 @@ from core.config import get_config
 from graph.builder import NODE_NAMES, _default_node
 from graph.state import InvestmentState
 
+RECURSION_SLACK = 20  # 탐색 서브그래프·보고서 등 후보 루프 밖의 단계 여유분
+
 
 class SupervisorState(InvestmentState, total=False):
     supervisor_next: str
@@ -20,6 +22,8 @@ class SupervisorState(InvestmentState, total=False):
     supervisor_queries: list[str]
     supervisor_reviews: dict
     supervisor_final_review: dict
+    supervisor_excluded: list[dict]
+    supervisor_failed: str | None
 
 
 def worker_node(name: str, node):
@@ -42,24 +46,19 @@ def worker_node(name: str, node):
                 inbox["current"].get("evidence_ids", []) + ids))
             inbox["supervisor_research_ids"] = ids
         out = node.invoke(inbox, config) if hasattr(node, "invoke") else node(inbox)
-        if name in ANALYSIS_DEPENDENCIES and not out.get(name):
-            raise ValueError(f"{name} 에이전트가 분석 결과를 반환하지 않았습니다")
+        if name in ANALYSIS_DEPENDENCIES and not out.get(name):  # 빈 결과는 Supervisor 가 근거 부족으로 처리한다
+            out = {**out, "supervisor_failed": name}
         if name == "report":
             out["report"] = {**out["report"], "evidence_review": state["supervisor_final_review"]}
         return out
     return run
 
 
-def halt_node(state: dict) -> dict:
-    reason = state["supervisor_final_review"]["reason"]
-    return {"end_reason": "insufficient_evidence", "report": {"mode": "insufficient_evidence", "pdf": None},
-            "log": [f"[Supervisor 중단] 보고서 작성 승인 안 됨: {reason}"]}
-
-
 def supervisor_recursion_limit() -> int:
     cfg = get_config()
-    # 재조사 때 의존 분석을 다시 수행하는 최악 경로까지 허용한다. 보고서 승인은 별도의 근거 검토다.
-    steps = 2 * cfg.workflow.max_evaluations * (len(NODE_NAMES) + 4 * cfg.supervisor.max_reworks_per_candidate) + 20
+    # 단계마다 에이전트 → supervisor 2스텝, 재조사 1회에 최악의 경우 분석 에이전트 전부를 다시 돈다
+    per_candidate = len(NODE_NAMES) + len(ANALYSIS_DEPENDENCIES) * cfg.supervisor.max_reworks_per_candidate
+    steps = 2 * cfg.workflow.max_evaluations * per_candidate + RECURSION_SLACK
     return max(cfg.workflow.recursion_limit, steps)
 
 
@@ -74,9 +73,7 @@ def build_supervisor_graph(nodes: dict | None = None):
         node = nodes[name] if name in nodes else _default_node(name)
         g.add_node(name, worker_node(name, node))
         g.add_edge(name, END if name == "report" else "supervisor")
-    g.add_node("halt", halt_node)
-    g.add_edge("halt", END)
     g.add_edge(START, "supervisor")
     g.add_conditional_edges("supervisor", lambda state: state["supervisor_next"],
-                            {name: name for name in (*NODE_NAMES, "halt")})
+                            {name: name for name in NODE_NAMES})
     return g.compile()

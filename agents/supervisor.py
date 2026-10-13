@@ -25,7 +25,7 @@ WORKER_INPUTS = {
     "market": {"current", "tech", "market_cache"},
     "competition": {"current", "founder", "tech"},
     "decide": {"current", "founder", "tech", "market", "competition", "iterations"},
-    "report": set(InvestmentState.__annotations__),
+    "report": set(InvestmentState.__annotations__) | {"supervisor_excluded"},
 }
 
 
@@ -44,12 +44,14 @@ class EvidenceReview(BaseModel):
 
 def _ask(schema, template: str, context: dict):
     return bounded(schema, kind="supervisor").invoke([
-        SystemMessage(render(template)), HumanMessage(json.dumps(context, ensure_ascii=False)),
+        SystemMessage(render(template, domain=get_config().domain.name)),
+        HumanMessage(json.dumps(context, ensure_ascii=False)),
     ])
 
 
 def _context(state: dict, completed: list[str]) -> dict:
     c = state["current"]
+    cfg = get_config().supervisor
     reg = state.get("registry", {})
     ids = list(c.get("evidence_ids", []))
     views = {}
@@ -60,9 +62,9 @@ def _context(state: dict, completed: list[str]) -> dict:
         views[name] = {"criterion": result.get("criterion", {}),
                        "evidence_ids": result.get("evidence_ids", []),
                        "summary": json.dumps({k: v for k, v in result.items()
-                                              if k not in {"criterion", "pool_ids"}}, ensure_ascii=False)[:1800]}
+                                              if k not in {"criterion", "pool_ids"}}, ensure_ascii=False)[:cfg.context_summary_chars]}
     sources = {i: {k: s.get(k) for k in ("title", "url", "date", "kind", "publisher")}
-               | {"text": (s.get("body") or s.get("text") or s.get("snippet") or "")[:900]}
+               | {"text": (s.get("body") or s.get("text") or s.get("snippet") or "")[:cfg.context_source_chars]}
                for i in dict.fromkeys(ids) if (s := reg.get(i))}
     return {"candidate": c, "completed": completed, "analysis": views, "sources": sources,
             "reworks": state.get("supervisor_reworks", 0),
@@ -83,16 +85,39 @@ def _dispatch(state: dict, selected: str, completed: list[str], reason: str, **u
             "supervisor_task": inbox["supervisor_task"], "supervisor_inbox": inbox, "log": [msg]}
 
 
-def _finish(state: dict, completed: list[str], selected: str) -> dict:
+def _finish(state: dict, completed: list[str], selected: str, **updates) -> dict:
     names = [e["name"] for e in state.get("evaluations", [])]
-    reviews = state.get("supervisor_reviews", {})
-    sufficient = all(reviews.get(name, {}).get("sufficient") for name in names)
-    final = {"sufficient": sufficient, "reviewed_candidates": names,
-             "reason": "평가한 모든 후보의 관점·근거 검토 완료" if sufficient else "근거 검토를 통과하지 않은 후보가 있음"}
-    if not names:
-        final["reason"] = "적격 평가 후보 없음 — 투자 추천 없이 탐색 결과만 보고"
-    return _dispatch(state, selected if sufficient else "halt", completed, final["reason"],
-                     supervisor_final_review=final)
+    excluded = [x["candidate"] for x in updates.get("supervisor_excluded", state.get("supervisor_excluded", []))]
+    reason = "평가한 모든 후보의 관점·근거 검토 완료" if names else "적격 평가 후보 없음 — 투자 추천 없이 탐색 결과만 보고"
+    if excluded:
+        reason += f" (근거 부족으로 제외 {len(excluded)}곳: {', '.join(excluded)})"
+    final = {"sufficient": True, "reviewed_candidates": names, "excluded_candidates": excluded, "reason": reason}
+    return _dispatch(state, selected, completed, reason, supervisor_final_review=final, **updates)
+
+
+def _new_queries(review: EvidenceReview, previous: set[str]) -> list[str]:
+    return list(dict.fromkeys(q.strip() for q in review.queries if q.strip() and q.strip() not in previous))[:3]
+
+
+def _normalize(review: EvidenceReview, sources: dict) -> EvidenceReview:
+    """LLM 답의 형식 오류는 실행을 멈추지 않고 보정한다. 실재하지 않는 근거 ID 로는 승인하지 않는다."""
+    cited = [i for i in review.evidence_ids if i in sources]
+    if review.sufficient and not cited:
+        return review.model_copy(update={"sufficient": False, "evidence_ids": [],
+                                         "reason": f"승인 근거 ID 가 실재하지 않음: {review.reason}"})
+    if review.sufficient:
+        return review.model_copy(update={"evidence_ids": cited, "rework_agent": None, "queries": []})
+    target = review.rework_agent if review.rework_agent in ANALYSIS_DEPENDENCIES else None
+    return review.model_copy(update={"evidence_ids": cited, "rework_agent": target})
+
+
+def _exclude(state: dict, completed: list[str], name: str, reason: str, **updates) -> dict:
+    """재조사로도 근거가 부족한 후보는 제외하고 다음 후보로 넘어간다 (실행 전체를 멈추지 않는다)."""
+    excluded = [*state.get("supervisor_excluded", []), {"candidate": name, "reason": reason}]
+    updates = {**updates, "supervisor_excluded": excluded}
+    if state.get("iterations", 0) >= get_config().workflow.max_evaluations:
+        return _finish(state, completed, "report", end_reason="max_evaluations", **updates)
+    return _dispatch(state, "discover", completed, f"근거 부족으로 제외 → 다음 후보: {reason}", **updates)
 
 
 def supervisor_node(state: dict) -> dict:
@@ -107,6 +132,9 @@ def supervisor_node(state: dict) -> dict:
     if previous == "discover":
         completed = []
         state = {**state, "supervisor_reworks": 0, "supervisor_queries": []}
+    elif previous in ANALYSIS_DEPENDENCIES and state.get("supervisor_failed") == previous:
+        return _exclude(state, completed, state["current"]["official_name"],
+                        f"{previous} 에이전트가 분석 결과를 돌려주지 않음", supervisor_failed=None)
     elif previous in ANALYSIS_DEPENDENCIES and previous not in completed:
         completed.append(previous)
 
@@ -121,42 +149,33 @@ def supervisor_node(state: dict) -> dict:
         else:
             result = _ask(SupervisorChoice, "supervisor", {**context, "available_workers": ready})
             selected, reason = result.next_agent, result.reason
-            if selected not in ready:
-                raise ValueError(f"Supervisor가 실행 불가능한 작업을 선택했습니다: {selected} (가능: {ready})")
+            if selected not in ready:  # 실행할 수 없는 작업을 고르면 가능한 첫 작업으로
+                selected, reason = ready[0], f"LLM 선택({selected})이 실행 불가능해 가능한 작업으로 대체"
         return _dispatch(state, selected, completed, reason, **reset)
 
     # 네 관점의 수집 완료만으로 보고서를 허용하지 않는다. 근거를 검토한 뒤 분기한다.
-    review = _ask(EvidenceReview, "supervisor_review", context)
     limit = get_config().supervisor.max_reworks_per_candidate
     previous_queries = set(reset["supervisor_queries"])
-    queries = list(dict.fromkeys(q.strip() for q in review.queries if q.strip() and q.strip() not in previous_queries))
-    if not review.sufficient and reset["supervisor_reworks"] < limit and not queries:
-        review = _ask(EvidenceReview, "supervisor_review", {
-            **context, "feedback": "직전 제안에 새로운 검색 질문이 없습니다. previous_queries를 제외한 새로운 질문을 제안하세요.",
-        })
-        queries = list(dict.fromkeys(q.strip() for q in review.queries if q.strip() and q.strip() not in previous_queries))
+    review = _normalize(_ask(EvidenceReview, "supervisor_review", context), context["sources"])
+    queries = _new_queries(review, previous_queries)
+    if not review.sufficient and reset["supervisor_reworks"] < limit and not (queries and review.rework_agent):
+        review = _normalize(_ask(EvidenceReview, "supervisor_review", {
+            **context, "feedback": ("승인하려면 sources 에 있는 근거 ID 를 적어라. 부족하면 rework_agent 와 "
+                                    "previous_queries 를 제외한 새로운 검색 질문을 제안하라."),
+        }), context["sources"])
+        queries = _new_queries(review, previous_queries)
     name = state["current"]["official_name"]
-    record = {**review.model_dump(), **reset}
-    reviews = {**state.get("supervisor_reviews", {}), name: record}
+    reviews = {**state.get("supervisor_reviews", {}), name: {**review.model_dump(), **reset}}
     if review.sufficient:
-        cited = set(review.evidence_ids)
-        if not cited or not cited <= set(context["sources"]):
-            raise ValueError("Supervisor의 충분성 판단에 실재하는 근거 ID가 필요합니다")
-        if review.rework_agent is not None or review.queries:
-            raise ValueError("충분성 승인과 재작업 요청을 동시에 할 수 없습니다")
         return _dispatch(state, "decide", completed, review.reason, supervisor_reviews=reviews, **reset)
 
     if reset["supervisor_reworks"] >= limit:
-        final = {"sufficient": False, "reason": f"재조사 한도 {limit}회 소진: {review.reason}", "candidate": name}
-        return _dispatch(state, "halt", completed, final["reason"], supervisor_reviews=reviews,
-                         supervisor_final_review=final, **reset)
+        return _exclude(state, completed, name, f"재조사 한도 {limit}회 소진: {review.reason}",
+                        supervisor_reviews=reviews, **reset)
     target = review.rework_agent
-    if not queries:
-        final = {"sufficient": False, "reason": f"새 재조사 질문 생성 실패: {review.reason}", "candidate": name}
-        return _dispatch(state, "halt", completed, final["reason"], supervisor_reviews=reviews,
-                         supervisor_final_review=final, **reset)
-    if target not in ANALYSIS_DEPENDENCIES or not 1 <= len(queries) <= 3:
-        raise ValueError("근거 부족이면 담당 에이전트와 구체적인 검색 질문 1~3개가 필요합니다")
+    if not queries or target is None:
+        return _exclude(state, completed, name, f"재조사 대상·질문 생성 실패: {review.reason}",
+                        supervisor_reviews=reviews, **reset)
     # 선행 관점이 바뀌면 그 결과를 사용한 분석도 다시 수행한다.
     invalid = {target}
     for worker, deps in ANALYSIS_DEPENDENCIES.items():

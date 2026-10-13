@@ -21,10 +21,6 @@ from tools.sources import SourceRegistry
 
 AGENT = "market"
 MIN_SUBQ, MAX_SUBQ = 3, 6
-# 분해가 3개 미만일 때 채우는 기본 질문
-DEFAULT_SUBQ = [("국내 스마트농업·스마트팜 시장 규모 (기관별 추정치, 기준 연도)", "시장 규모"),
-                ("{seg} 글로벌 시장 규모와 연평균 성장률 (2024년 이후 발표)", "성장률"),
-                ("애그테크 벤처 투자 동향 ({prev}년 투자액 증감, 국가별 증감)", "투자 동향")]
 
 
 class SubQuestion(BaseModel):
@@ -70,14 +66,15 @@ def plan(seg: dict, date: str, catalog: str) -> tuple[str, list[SubQuestion], bo
         render("market_decompose", segment=seg["name"], question=question, run_date=date, catalog=catalog))
     subs = [s for s in dec.sub_questions if s.question.strip()][:MAX_SUBQ]
     padded = len(subs) < MIN_SUBQ
-    for q, purpose in DEFAULT_SUBQ:
+    defaults = [SubQuestion(question=d["question"].format(seg=seg["name"], prev=int(date[:4]) - 1), purpose=d["purpose"])
+                for d in get_config().domain.market_default_questions]
+    for d in defaults:
         if len(subs) >= MIN_SUBQ:
             break
-        subs.append(SubQuestion(question=q.format(seg=seg["name"], prev=int(date[:4]) - 1), purpose=purpose))
+        subs.append(d)
     added = not any("투자" in s.purpose for s in subs)
     if added:
-        q, purpose = DEFAULT_SUBQ[2]
-        subs.append(SubQuestion(question=q.format(prev=int(date[:4]) - 1), purpose=purpose))
+        subs.append(next(d for d in defaults if "투자" in d.purpose))
     return question, subs, padded, added
 
 

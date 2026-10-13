@@ -30,6 +30,8 @@ ALLOWED = {"Seed", "Pre-A", "Series A", "Pre-B", "Series B", "Pre-C", "Series C"
 # 구조화 스냅샷 근거는 G6 출처 수에서 뺀다
 SNAPSHOT_KEYS = ("nps:", "tips:")
 STALE_MONTHS = 60
+_SECTORS = get_config().domain.sectors
+Sector = Literal[(*_SECTORS["options"], "unknown")]
 Stage = Literal["Seed", "Pre-A", "Series A", "Pre-B", "Series B", "Pre-C", "Series C",
                 "Pre-IPO", "Series D 이상", "Unknown"]
 
@@ -48,9 +50,10 @@ class Eligibility(BaseModel):
     exit_evidence_ids: list[str] = Field(description="상장·Exit 판단 근거 id (없으면 빈 목록)")
     ai_core: Literal["YES", "NO", "UNKNOWN"] = Field(
         description="AI·컴퓨터비전·자율주행·로봇·데이터 기반 자동화가 제품 핵심이면 YES, 기술 기업이 아님이 분명하면 NO, 근거 부족이면 UNKNOWN")
-    agtech_fit: Literal["YES", "NO", "UNKNOWN"] = Field(
-        description="농업·축산 생산 현장의 생산성 향상 기술이면 YES, 유통·중개·거래 플랫폼·수산 양식·식품 가공·배달·"
-                    "다른 산업이 주력이면 NO, 근거 부족이면 UNKNOWN")
+    sector: Sector = Field(description="회사의 주력 사업 분야 하나: "
+                           + ", ".join(f"{k}({v})" for k, v in _SECTORS["options"].items())
+                           + ". 근거에 사업 설명이 전혀 없으면 unknown")
+    sector_quote: str = Field(description="주력 분야를 판단한 근거 원문 그대로의 짧은 인용 (80자 이내). 없으면 빈 문자열")
     corporate_affiliate: bool = Field(description="상장사·대기업의 자회사·사내 부서·합작사면 true (독립 스타트업 아님)")
     distress: bool = Field(description="법정관리·대규모 구조조정·폐업·사업 중단 등 치명적 신호가 있으면 true")
     distress_note: str = Field(description="치명적 신호 요약, 없으면 빈 문자열")
@@ -178,12 +181,14 @@ def _check_one(cand: dict, registry: dict) -> tuple[dict, dict]:
         reasons.append("투자 단계 근거 id 없음")
     if res.corporate_affiliate:
         reasons.append("G5 상장사·대기업 계열 (독립 스타트업 아님)")
+    # 분야 통과 여부는 LLM 이 고른 주력 분야로 코드가 정한다
+    fit = "UNKNOWN" if res.sector == "unknown" else "YES" if res.sector in _SECTORS["target"] else "NO"
     if res.ai_core == "NO":
         reasons.append("G5 AI 가 핵심 기술이 아님")
-    if res.agtech_fit == "NO":
-        reasons.append("G5 AgTech 분야가 아님")
-    if "NO" not in (res.ai_core, res.agtech_fit) and "UNKNOWN" in (res.ai_core, res.agtech_fit):
-        reasons.append("G5 AI 농업 생산성 기술 확인 불가")
+    if fit == "NO":
+        reasons.append(f"G5 대상 분야가 아님 ({_SECTORS['options'][res.sector]}: \"{res.sector_quote}\")")
+    if "NO" not in (res.ai_core, fit) and "UNKNOWN" in (res.ai_core, fit):
+        reasons.append("G5 AI·대상 분야 확인 불가")
     if res.distress:
         reasons.append(f"G4 중대한 부정 신호: {res.distress_note}")
     if nps.get("withdrawn"):

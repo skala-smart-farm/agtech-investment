@@ -13,7 +13,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from agents.tech import candidate_line, evidence_blocks, judge_own
-from core.config import get_segment
+from core.config import get_config, get_segment
 from core.llm import structured
 from core.llm_bounded import bounded
 from core.prompts import render
@@ -38,7 +38,7 @@ LIST_SEP = re.compile(r"\s?,\s?|\s(?:and|or)\s")
 NOT_COMPANY = {"시장", "기업", "업체", "회사", "스타트업", "경쟁사", "경쟁", "제품", "기술", "정부", "농가", "농업", "외국", "해외",
                "국내", "업계", "로봇", "등", "대비", "비슷한", "유사한", "다른", "기존", "현지", "The", "Other", "Many",
                "진출", "수출", "작물", "딸기", "토마토", "오이", "파프리카", "과일", "채소", "서비스", "솔루션", "플랫폼", "대표",
-               "한국", "정부", "전시회", "박람회", "CES", "투자", "고객", "농장", "온실", "스마트팜"}
+               "한국", "정부", "전시회", "박람회", "CES", "투자", "고객", *get_config().domain.non_company_words}
 # 이름 끝의 조사
 PARTICLE = re.compile(r"(?<=[가-힣A-Za-z]{2})(?:보다|에서|에게|으로|와|과|의|는|은|를|을|도|로|가|이|에)$")
 # 대상이 경쟁사보다 낫다는 단정 ('회사 측 주장:' 뒤는 허용)

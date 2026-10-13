@@ -42,24 +42,13 @@ def _channel_queries(cfg, round_no: int) -> list[tuple[str, str, dict]]:
     if round_no == 1:
         for s in segs:
             q.append(("A.투자뉴스", f"{s['ko']} 스타트업 투자 유치 시리즈", {"topic": "news"}))
-        q += [
-            ("B.공공프로그램", "TIPS 선정 애그테크 스마트팜 AI 스타트업", {"topic": "general", "recent": False}),
-            ("B.공공프로그램", "농식품 벤처육성 선정 AI 애그테크 스타트업", {"topic": "general", "recent": False}),
-            ("B.공공프로그램", "이달의 A-벤처스 선정 농식품 AI 기업", {"topic": "general", "recent": False}),
-            ("B.공공프로그램", "스마트농업 우수기업 선정 AI 스타트업", {"topic": "news"}),
-            ("C.스타트업DB", "스마트팜 AI 스타트업 투자 단계", {"topic": "general", "recent": False,
-                                                    "include_domains": ["thevc.kr", "innoforest.co.kr"]}),
-            ("C.스타트업DB", "농업 로봇 축산 AI 스타트업", {"topic": "general", "recent": False,
-                                                 "include_domains": ["thevc.kr", "innoforest.co.kr"]}),
-            ("D.수상전시", "CES 혁신상 애그테크 한국 스타트업 AI", {"topic": "news"}),
-            ("F.해외투자뉴스", "AI agtech startup raises Series A", {"topic": "news"}),
-            ("F.해외투자뉴스", "agricultural robotics startup raises seed funding", {"topic": "news"}),
-        ]
     else:
         for s in segs:
             q.append(("A.투자뉴스", f"{s['ko']} 기업 프리A 시드 투자", {"topic": "news", "recent": False}))
             q.append(("F.해외투자뉴스", f"{s['en']} startup funding round", {"topic": "news"}))
-        q.append(("B.공공프로그램", "스마트팜 혁신밸리 입주 스타트업 AI", {"topic": "general", "recent": False}))
+    for item in cfg.domain.discovery_queries[f"round{min(round_no, 2)}"]:
+        opts = {k: v for k, v in item.items() if k not in ("channel", "query")}
+        q.append((item["channel"], item["query"], opts))
     return q
 
 
@@ -88,12 +77,12 @@ def discovery_node(state: dict) -> dict:
             by_channel.setdefault("T.TIPS선정", []).append(sid)
         for w in wowtale_agtech_funding():
             sid = reg.add_web({"url": w["url"], "title": w["title"], "content": w["title"],
-                               "published_date": w["date"]}, AGENT, "와우테일 애그테크 피드", today())
+                               "published_date": w["date"]}, AGENT, f"와우테일 {cfg.domain.name_ko} 피드", today())
             by_channel.setdefault("W.투자기사피드", []).append(sid)
 
     rag_traces = []
     if round_no == 1:
-        ids, trace = agentic_rag("국내외 애그테크 스타트업 사례와 투자 동향 (기업명 포함)",
+        ids, trace = agentic_rag(f"국내외 {cfg.domain.name_ko} 스타트업 사례와 투자 동향 (기업명 포함)",
                                  "투자 후보 스타트업 발굴", reg, AGENT)
         by_channel["E.문서RAG"] = ids
         rag_traces.append({"agent": AGENT, "question": "스타트업 사례", "trace": trace})

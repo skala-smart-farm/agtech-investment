@@ -24,7 +24,7 @@ def add_unique(a: list | None, b: list | None) -> list:
 class InvestmentState(TypedDict, total=False):
     # ── 실행 설정
     domain: str                                        # 도메인 이름 "AgTech"  [app → 실행 기록]
-    run_date: str                                      # 평가 기준일 YYYY-MM-DD (24개월 판정·근거 조회일)  [app → 전 노드]
+    run_date: str                                      # 평가 기준일 YYYY-MM-DD (최근 기간 판정·근거 조회일)  [app → 전 노드]
 
     registry: Annotated[dict, merge_dict]              # 근거 저장소 {근거 id: 문서·웹 메타데이터}, id → REFERENCE  [전 에이전트 → 전 에이전트·report]
 
