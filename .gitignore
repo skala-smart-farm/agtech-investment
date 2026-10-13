@@ -32,3 +32,6 @@ replay/nps/
 # 실행 기록·개인 작업 노트
 run_log.json
 notes.md
+cost_history.jsonl
+threshold_sensitivity.json
+outputs/fresh_*/
