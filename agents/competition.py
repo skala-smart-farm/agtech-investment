@@ -190,7 +190,7 @@ def competition_node(state: dict) -> dict:
         core_technology=_plain(tech.get("core_technology")),
         named="\n".join(f"- {m['name']}: \"{m['quote']}\"" for m in named) or "(없음)"))
     queries = list(dict.fromkeys(q.strip() for q in plan.queries if q.strip()))[:MAX_QUERIES]
-    ids = []
+    ids = list(state.get("supervisor_research_ids", []))
     for q in queries:
         ids += web_search(q, reg, AGENT, topic="general", recent=False)
     ids += web_search(f"{name} 경쟁사", reg, AGENT, topic="news", recent=False, raw=True)

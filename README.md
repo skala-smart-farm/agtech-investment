@@ -74,6 +74,39 @@ python app.py              # API 키 없이 제출 보고서 재현 → outputs/
 - 새로 평가 (`.env` 에 `OPENAI_API_KEY`, `SERPER_API_KEY` 또는 `TAVILY_API_KEY`) : `python app.py --fresh --calibrate` → `python app.py --fresh`
 - 테스트 : `python -m pytest`
 
+### Supervisor 패턴 실험
+`codex/supervisor-agent` 브랜치에서 `--supervisor`를 붙이면 각 에이전트가 작업 후 Supervisor로 돌아온다.
+Supervisor는 현재 수집된 관점을 보고 LLM으로 다음 작업과 이유를 선택한다.
+Agent-as-Tool과 Swarm은 사용하지 않으며, 각 에이전트는 기존 LangGraph 노드로 실행한다.
+하위 에이전트는 Supervisor가 만든 입력만 받고 결과를 Supervisor로 반환한다. 하위 에이전트 간 직접 간선이나 호출은 없다.
+선행 결과가 필요한 관점에는 Supervisor가 승인한 결과를 전달한다. 기술 분석 후 시장 분석,
+창업자·기술 분석 후 경쟁 분석이라는 의존성을 지키면서 미수집 관점의 순서는 LLM이 선택한다.
+관점이 모두 모이면 Supervisor가 문항별 판정·인용·실제 출처로 근거 충분성을 검토한다.
+부족하면 담당 관점과 새로운 검색 질문을 지정해 재작업을 요청한다. 새 결과를 받은 뒤 충분성을 다시 검토한다.
+선행 분석을 재작업하면 그 결과를 사용한 분석도 다시 수행한다. 시장 재조사에서는 이전 시장 분석 캐시를 재사용하지 않는다.
+충분성이 승인된 후보만 투자 판단을 수행하고, 평가 후보 모두가 승인을 받았을 때 보고서 작성으로 분기한다.
+재조사는 후보당 `supervisor.max_reworks_per_candidate`(기본 2회)로 제한한다. 이는 비용 한도이며 보고서 승인 조건이 아니다.
+한도 소진 후에도 부족하면 `insufficient_evidence`로 종료하고 보고서를 작성하지 않는다(종료 코드 2).
+중단된 보정 실행은 동종 비교 기준도 갱신하지 않는다.
+평가 상한·투자 추천 시 종료·후보 소진·보정 모드는 기존 규칙을 따르되, 충분성 승인이 선행한다.
+이는 LangGraph의 [구조화 출력 라우팅 방식](https://docs.langchain.com/oss/python/langgraph/workflows-agents)을 사용한다.
+
+```bash
+source .venv/bin/activate
+python app.py --fresh --supervisor --calibrate
+python app.py --fresh --supervisor --out outputs/supervisor_report
+```
+
+충분성 승인 시 보고서는 `outputs/supervisor_report/investment_report.pdf`에 저장한다.
+실행 순서·재조사 질문은 같은 폴더의 `run_log.json`의 `log`, 후보별 충분성 판단은 `supervisor.reviews`,
+최종 보고서 승인 여부는 `supervisor.final_review`에 남는다. 적격 후보가 없으면 탐색 결과만 보고하는 기존 분기를 사용한다.
+재조사 한도가 소진돼 중단되면 부족 사유만 실행 로그에 남으며 이번 실행의 PDF는 생성되지 않는다.
+기존처럼 `.env`에 OpenAI 키와 검색 키가 필요하다. `--fresh`는 `cache_fresh/`를 사용하므로 이미 저장된 결과는 재사용한다.
+Supervisor 선택은 새 LLM 호출이라 제출용 `replay/`만으로 오프라인 재현되지 않는다.
+분석 순서가 달라지면 기존 캐시가 맞지 않을 수 있다. `--supervisor` 없이 실행하면 기존 순차 그래프를 사용한다.
+순차 실행보다 라우팅·충분성 검토·추가 검색 비용이 늘고, 충분성 판단은 LLM에 의존한다.
+그 대신 핵심 근거가 부족한 상태에서 자동으로 보고서를 작성하는 것을 막고, 재조사 요청과 판단 이유를 추적할 수 있다.
+
 ## 투자 평가 결과
 | 순위 | 후보 | 단계 · 지역 | 동종 평균 대비 | 창업자 기준 | 판정 |
 |---|---|---|---|---|---|
