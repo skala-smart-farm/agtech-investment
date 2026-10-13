@@ -209,6 +209,30 @@ def test_supervisor_rejects_fabricated_evidence(supervisor_llm):
     assert "decide" not in f.calls and "report" not in f.calls
 
 
+@pytest.mark.parametrize("new_queries, expected_searches, sufficient", [
+    (["A 고객 확인", "A 매출 확인"], ["A 고객 확인", "A 매출 확인"], True),
+    (["A 고객 확인"], ["A 고객 확인", "A 매출 확인"], True),
+    (["A 고객 확인"], ["A 고객 확인"], False),
+])
+def test_supervisor_handles_repeated_rework_queries(supervisor_llm, new_queries, expected_searches, sufficient):
+    from agents.supervisor import EvidenceReview
+    from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
+
+    def shortage(queries):
+        return EvidenceReview(sufficient=False, reason="추가 검증 필요", evidence_ids=[],
+                              rework_agent="market", queries=queries)
+
+    supervisor_llm.reviews.extend([shortage(["A 고객 확인"]), shortage(new_queries)])
+    if new_queries == ["A 고객 확인"]:
+        supervisor_llm.reviews.append(shortage(["A 매출 확인"] if sufficient else ["A 고객 확인"]))
+    f = Fakes([["A"]])
+    out = build_supervisor_graph(supervisor_nodes(f)).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
+    assert [query for _, query in supervisor_llm.searches] == expected_searches
+    assert out["supervisor_final_review"]["sufficient"] is sufficient
+    assert f.calls.count("report") == int(sufficient)
+    assert any(p.get("feedback") for p in supervisor_llm.prompts) == (new_queries == ["A 고객 확인"])
+
+
 def test_supervisor_worker_input_is_isolated():
     from graph.supervisor import worker_node
 

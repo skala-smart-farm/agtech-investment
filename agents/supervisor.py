@@ -114,7 +114,7 @@ def supervisor_node(state: dict) -> dict:
     ready = [n for n, deps in ANALYSIS_DEPENDENCIES.items() if n not in done and deps <= done]
     context = _context(state, completed)
     reset = {"supervisor_reworks": state.get("supervisor_reworks", 0),
-             "supervisor_queries": state.get("supervisor_queries", [])}
+             "supervisor_queries": list(state.get("supervisor_queries", []))}
     if ready:
         if len(ready) == 1:
             selected, reason = ready[0], "미수집 관점 중 선행 분석이 완료된 작업"
@@ -127,6 +127,14 @@ def supervisor_node(state: dict) -> dict:
 
     # 네 관점의 수집 완료만으로 보고서를 허용하지 않는다. 근거를 검토한 뒤 분기한다.
     review = _ask(EvidenceReview, "supervisor_review", context)
+    limit = get_config().supervisor.max_reworks_per_candidate
+    previous_queries = set(reset["supervisor_queries"])
+    queries = list(dict.fromkeys(q.strip() for q in review.queries if q.strip() and q.strip() not in previous_queries))
+    if not review.sufficient and reset["supervisor_reworks"] < limit and not queries:
+        review = _ask(EvidenceReview, "supervisor_review", {
+            **context, "feedback": "직전 제안에 새로운 검색 질문이 없습니다. previous_queries를 제외한 새로운 질문을 제안하세요.",
+        })
+        queries = list(dict.fromkeys(q.strip() for q in review.queries if q.strip() and q.strip() not in previous_queries))
     name = state["current"]["official_name"]
     record = {**review.model_dump(), **reset}
     reviews = {**state.get("supervisor_reviews", {}), name: record}
@@ -138,17 +146,17 @@ def supervisor_node(state: dict) -> dict:
             raise ValueError("충분성 승인과 재작업 요청을 동시에 할 수 없습니다")
         return _dispatch(state, "decide", completed, review.reason, supervisor_reviews=reviews, **reset)
 
-    limit = get_config().supervisor.max_reworks_per_candidate
     if reset["supervisor_reworks"] >= limit:
         final = {"sufficient": False, "reason": f"재조사 한도 {limit}회 소진: {review.reason}", "candidate": name}
         return _dispatch(state, "halt", completed, final["reason"], supervisor_reviews=reviews,
                          supervisor_final_review=final, **reset)
     target = review.rework_agent
-    queries = list(dict.fromkeys(q.strip() for q in review.queries if q.strip()))
+    if not queries:
+        final = {"sufficient": False, "reason": f"새 재조사 질문 생성 실패: {review.reason}", "candidate": name}
+        return _dispatch(state, "halt", completed, final["reason"], supervisor_reviews=reviews,
+                         supervisor_final_review=final, **reset)
     if target not in ANALYSIS_DEPENDENCIES or not 1 <= len(queries) <= 3:
         raise ValueError("근거 부족이면 담당 에이전트와 구체적인 검색 질문 1~3개가 필요합니다")
-    if set(queries) & set(reset["supervisor_queries"]):
-        raise ValueError("재조사는 이전 질문을 반복하지 않고 새로운 검색 질문을 사용해야 합니다")
     # 선행 관점이 바뀌면 그 결과를 사용한 분석도 다시 수행한다.
     invalid = {target}
     for worker, deps in ANALYSIS_DEPENDENCIES.items():
