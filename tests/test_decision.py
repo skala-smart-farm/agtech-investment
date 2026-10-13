@@ -120,8 +120,9 @@ def test_all_unknown_and_all_yes():
 
 def test_unknown_ratio_in_reason_not_label():
     """옛 '정보 부족'(미확인 ≥ 60%) 이름표는 없다. 미확인 비율은 사유 문장에만 적고, 보류 유형은
-    Deal-killer > 창업자 점수 평균 미만 > 동종 평균 이하 우선순위를 따른다 (사유도 그 순서로 모두 적는다)."""
-    assert dec.HOLD_TYPES == ("Deal-killer", "창업자 점수 평균 미만", "동종 평균 이하")
+    근거 부족 > Deal-killer > 창업자 점수 평균 미만 > 동종 평균 이하 우선순위를 따른다 (사유도 그 순서로 모두 적는다).
+    근거 부족은 Supervisor 가 붙이는 이름표라 decide_rule 은 나머지 셋만 쓴다."""
+    assert dec.HOLD_TYPES == ("근거 부족", "Deal-killer", "창업자 점수 평균 미만", "동종 평균 이하")
     # 창업자 F1 YES, 나머지 미확인(96%): 팀은 평균 이상(1.012)이지만 M ≤ 1.00 → '동종 평균 이하'
     rows = _rows({"F1": "YES"})
     M, fc, _ = _score(rows)
@@ -397,3 +398,11 @@ def test_rubric_decision_rule_matches_config():
     assert not re.search(r"(?<![\d.])(70|1\.10)(?![\d])", rule), "옛 기준 수치(70 · 1.10)"
     assert not re.search(r"[≥>]=?\s*(1\.1|110|70)", rule) and "YES ≥" not in rule and "미확인 ≥" not in rule
     assert not any(t in rule for t in ("정보 부족", "창업자 근거 없음", "동종 대비 열위", "설계 가정"))
+
+
+def test_node_evidence_shortfall_forces_hold(judged):
+    out = dec.decision_node({**_state("메타파머스"), "evidence_shortfall": "재조사 한도 5회 소진: 시장 근거 부족"})
+    sc, ev = out["scorecard"], out["evaluations"][0]
+    assert out["decision"] == "보류" and sc["hold_type"] == "근거 부족"  # 점수로는 투자여도 보류
+    assert sc["reasons"][0].startswith("재조사 후에도 근거 부족") and sc["flip"] is not None
+    assert ev["evidence_shortfall"].startswith("재조사 한도 5회") and sc["multiplier"] > 1

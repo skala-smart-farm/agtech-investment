@@ -218,7 +218,7 @@ def _pool(state: dict, evals: list[dict], screened: list[dict], cfg) -> dict:
     discovered = sum(counts) if counts else (len(raw) if rounds == 1 and raw else None)
     disc_split = split(raw) if rounds == 1 and raw and discovered == len(raw) else (None, None)
     eligible = [r for r in screened if r.get("eligible")]
-    excluded = state.get("supervisor_excluded") or []  # Supervisor 재조사 후에도 근거 부족으로 제외한 후보
+    excluded = state.get("supervisor_excluded") or []  # 분석 에이전트 실행 실패로 Supervisor 가 제외한 후보
     done = [n for e in evals for n in _names(e)] + [x["candidate"] for x in excluded]
     left = [r for r in eligible if not any(_same(r.get("official_name") or r["name"], n) or _same(r["name"], n)
                                            for n in done)]
@@ -269,7 +269,7 @@ def _funnel(pool: dict) -> str:
 
 
 def _hold_counts(evals: list[dict]) -> str:
-    order = ("동종 평균 이하", "기준 이하", "창업자 점수 평균 미만", "Deal-killer")
+    order = ("동종 평균 이하", "기준 이하", "창업자 점수 평균 미만", "Deal-killer", "근거 부족")
     types = [e.get("hold_type") or (e.get("scorecard") or {}).get("hold_type") for e in evals]
     return " · ".join(f"{t} {types.count(t)}" for t in order if types.count(t))
 
@@ -736,7 +736,7 @@ def _limitations(cfg, pool: dict, failed_by: dict[str, int], data_limits: list[s
                    + (f" — '투자 추천 없음'은 평가한 {pool['evaluated']}곳에 대한 결론이다" if mode == "hold"
                       else f" — 투자 추천 대상은 평가한 {pool['evaluated']}곳 중에서 골랐다" if pool["evaluated"] > 1 else ""))
     if ex := pool.get("excluded"):
-        out.append(f"적격 후보 {len(ex)}곳({'·'.join(x['candidate'] for x in ex)})은 재조사 후에도 근거가 부족해 평가에서 제외했다")
+        out.append(f"적격 후보 {len(ex)}곳({'·'.join(x['candidate'] for x in ex)})은 분석 에이전트 실행 실패로 평가에서 제외했다")
     if mode != "none":
         out.append("동종 기준 집단 평균 대비 상대 평가라 기준 집단 전체의 질이 낮으면 상대적으로 나은 기업이 추천될 수 있다"
                    f"{_reference_mix()}. 관문(실제 투자 유치 확인)·창업자 기준(동종 평균 이상) 요건·Deal-killer·실사 조건으로 보완한다")
@@ -930,6 +930,28 @@ def _evaluated_blocks(evals: list[dict], target: dict) -> list[dict]:
                   f"첫 투자 추천에서 멈추지 않고 평가 상한까지 평가해, 평가한 후보 안에서는 평가 순서가 결론을 바꾸지 않는다")]
 
 
+def _shortfall_blocks(evals: list[dict], pool: dict) -> list[dict]:
+    """Supervisor 근거 충분성 검토를 통과하지 못한 후보: '근거 부족' 보류로 채점한 후보와 실행 실패로 제외한 후보의 사유 전문."""
+    def split(reason: str) -> tuple[str, str]:
+        kind, _, why = reason.partition(": ")
+        return (kind, why) if why else ("-", reason)
+
+    out = []
+    held = [e for e in evals if e.get("evidence_shortfall")]
+    if held:
+        rows = [[e["name"], _s1((e.get("scorecard") or {}).get("multiplier")), *split(e["evidence_shortfall"])] for e in held]
+        out += [{"t": "h3", "text": f"근거 부족으로 보류한 후보 {len(held)}곳"},
+                _table(["후보", "동종 평균 대비", "구분", "사유 (Supervisor 근거 충분성 검토)"], rows,
+                       ["15%", "11%", "16%", "58%"], small=True),
+                _note("재조사 후에도 근거가 부족한 후보는 빼지 않고 확인되지 않은 문항을 미확인으로 채점해 '근거 부족' 보류로 둔다. "
+                      "비교표와 동종 기준 집단에는 그대로 들어간다")]
+    if ex := pool.get("excluded") or []:
+        out += [{"t": "h3", "text": f"실행 실패로 제외한 후보 {len(ex)}곳"},
+                _table(["후보", "구분", "사유"], [[x["candidate"], *split(x["reason"])] for x in ex],
+                       ["16%", "18%", "66%"], small=True)]
+    return out
+
+
 def _chapters_invest(target: dict, d: dict, t: dict, reg: SourceRegistry, cfg, pool: dict,
                      evals: list[dict] | None = None) -> list[dict]:
     sc = target["scorecard"]
@@ -941,6 +963,7 @@ def _chapters_invest(target: dict, d: dict, t: dict, reg: SourceRegistry, cfg, p
              _note(_rule_line(sc, cfg)), _note(_reference_line(sc, cfg)), _note(_sensitivity_line(sc)),
              _note(_bessemer_line(sc)),
              *(_evaluated_blocks(evals, target) if evals and len(evals) > 1 else [_note(_ranking_line(sc))]),
+             *_shortfall_blocks(evals or [target], pool),
              {"t": "box", "title": "ROI 참고치 (점수·결정에 넣지 않음)", "items": _roi_items(sc, reg, cfg)},
              {"t": "h3", "text": "사업 리스크(시장·기술·규제·경쟁)와 실사 조건"},
              _table(["유형", "내용", "실사 질문"], t["risks"], ["8%", "57%", "35%"], small=True),
@@ -998,6 +1021,7 @@ def _chapters_hold(evals: list[dict], target: dict, d: dict, t: dict, reg: Sourc
     if un:
         pool_blocks.append(_note(f"미평가 적격 후보 {len(un)}곳 ({pool['why']}): " + ", ".join(
             f"{u['name']}({u['stage']}{', 관문 검색 실패' if u['search_failed'] else ''})" for u in un)))
+    pool_blocks += _shortfall_blocks(evals, pool)
     ht = target.get("hold_type") or sc.get("hold_type")
     top_why = (f"기준 {_s100(thr)}을 넘지 못했다" if sc["multiplier"] <= thr
                else f"배수 기준은 넘었지만 보류 유형 '{ht}'에 해당한다")
@@ -1362,13 +1386,13 @@ def _no_candidate_report(state: dict, cfg, screened: list[dict], reg: SourceRegi
         reasons[key] = reasons.get(key, 0) + 1
     disc = f"{pool['discovered']}곳을 발굴해 " if pool.get("discovered") else ""
     excluded = pool["excluded"]
-    if excluded:  # 적격 후보는 있었지만 재조사 후에도 근거가 부족해 모두 제외
-        what, n_ok = "근거 충분 후보 없음", f"적격 {pool['eligible']}곳 · 근거 부족 제외 {len(excluded)}곳"
+    if excluded:  # 적격 후보는 있었지만 모두 실행 실패로 제외
+        what, n_ok = "평가 가능한 후보 없음", f"적격 {pool['eligible']}곳 · 실행 실패 제외 {len(excluded)}곳"
         situation = (f"국내외 {cfg.domain.name} AI 스타트업 {disc}{len(screened)}곳 중 적격 {pool['eligible']}곳을 찾았으나, "
-                     f"평가한 {len(excluded)}곳 모두 재조사 후에도 투자 판단에 필요한 근거가 부족했다")
+                     f"평가를 시작한 {len(excluded)}곳 모두 분석 에이전트 실행에 실패했다")
         basis = "제외 사유 " + "; ".join(f"{x['candidate']} — {x['reason'][:60]}" for x in excluded) + "(→1장)"
-        lead = f"적격 후보 {len(excluded)}곳은 근거 부족으로 제외했고, 나머지는 관문을 통과하지 못했다."
-        rows = ([[x["candidate"], "-", f"근거 부족으로 제외: {x['reason']}"] for x in excluded]
+        lead = f"적격 후보 {len(excluded)}곳은 실행 실패로 제외했고, 나머지는 관문을 통과하지 못했다."
+        rows = ([[x["candidate"], "-", f"실행 실패로 제외: {x['reason']}"] for x in excluded]
                 + [[r.get("official_name") or r["name"], r.get("stage") or "-", r.get("reason") or "-"]
                    for r in screened if not r.get("eligible")])
     else:

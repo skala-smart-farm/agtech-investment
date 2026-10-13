@@ -4,7 +4,7 @@
                      └→ report → evaluate ─(미달, 재작성 상한 전)→ report
                                          └─(통과 또는 상한)→ END
 
-근거가 부족하거나 실행에 실패한 후보는 Supervisor 가 제외하고 다음 후보로 넘어간다.
+재조사 후에도 근거가 부족한 후보는 '근거 부족' 보류로 채점하고, 실행에 실패한 후보만 제외한다.
 """
 from __future__ import annotations
 
@@ -40,6 +40,8 @@ def worker_node(name: str, node):
             inbox["registry"] = reg.data
             inbox["current"]["evidence_ids"] = list(dict.fromkeys(inbox["current"].get("evidence_ids", []) + ids))
             inbox["supervisor_research_ids"] = ids
+        if name == "decide" and task.get("agent") == "decide":
+            inbox["evidence_shortfall"] = task.get("shortfall")
         if name not in ANALYSIS_DEPENDENCIES:
             out = node.invoke(inbox, config) if hasattr(node, "invoke") else node(inbox)
             if name == "report":

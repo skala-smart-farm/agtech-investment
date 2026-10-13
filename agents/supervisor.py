@@ -110,7 +110,7 @@ def _finish(state: dict, selected: str, **updates) -> dict:
     if updates.get("end_reason") == "step_limit":
         reason = f"Supervisor 판단 상한 {get_config().supervisor.max_steps}회 도달 — 지금까지 평가한 후보로 보고"
     if excluded:
-        reason += f" (근거 부족으로 제외 {len(excluded)}곳: {', '.join(excluded)})"
+        reason += f" (실행 실패로 제외 {len(excluded)}곳: {', '.join(excluded)})"
     final = {"sufficient": True, "reviewed_candidates": names, "excluded_candidates": excluded, "reason": reason}
     return _dispatch(state, selected, reason, supervisor_final_review=final, **updates)
 
@@ -132,12 +132,19 @@ def _normalize(review: EvidenceReview, sources: dict) -> EvidenceReview:
 
 
 def _exclude(state: dict, name: str, reason: str, progress: dict, **updates) -> dict:
-    """재조사로도 근거가 부족하거나 실행에 실패한 후보는 제외하고 다음 후보로 넘어간다 (실행 전체를 멈추지 않는다)."""
+    """에이전트 실행에 실패해 채점할 결과가 없는 후보는 제외하고 다음 후보로 넘어간다 (실행 전체를 멈추지 않는다)."""
     excluded = [*state.get("supervisor_excluded", []), {"candidate": name, "reason": reason}]
     updates = {**updates, "supervisor_excluded": excluded, "view_progress": progress}
     if state.get("iterations", 0) >= get_config().workflow.max_evaluations:
         return _finish(state, "report", end_reason="max_evaluations", **updates)
-    return _dispatch(state, "discover", f"근거 부족으로 제외 → 다음 후보: {reason}", **updates)
+    return _dispatch(state, "discover", f"실행 실패로 제외 → 다음 후보: {reason}", **updates)
+
+
+def _hold_for_shortfall(state: dict, reason: str, progress: dict, **updates) -> dict:
+    """재조사로도 근거가 부족한 후보는 빼지 않고 투자 판단으로 보내 '근거 부족' 보류로 채점한다.
+    확인되지 않은 문항은 미확인(신호 0)으로 계산되고, 후보는 비교표·동종 기준 집단에 그대로 들어간다."""
+    return _dispatch(state, "decide", f"근거 부족 보류로 채점: {reason}", progress,
+                     supervisor_task={"agent": "decide", "shortfall": reason}, **updates)
 
 
 def supervisor_node(state: dict) -> dict:
@@ -198,12 +205,12 @@ def supervisor_node(state: dict) -> dict:
         return _dispatch(state, "decide", review.reason, progress, supervisor_reviews=reviews, **base)
 
     if base["supervisor_reworks"] >= limit:
-        return _exclude(state, name, f"재조사 한도 {limit}회 소진: {review.reason}", progress,
-                        supervisor_reviews=reviews, **base)
+        return _hold_for_shortfall(state, f"재조사 한도 {limit}회 소진: {review.reason}", progress,
+                                   supervisor_reviews=reviews, **base)
     target = review.rework_agent
     if not queries or target is None:
-        return _exclude(state, name, f"재조사 대상·질문 생성 실패: {review.reason}", progress,
-                        supervisor_reviews=reviews, **base)
+        return _hold_for_shortfall(state, f"재조사 대상·질문 생성 실패: {review.reason}", progress,
+                                   supervisor_reviews=reviews, **base)
     # 선행 관점이 바뀌면 그 결과를 사용한 분석도 다시 수행한다.
     invalid = {target}
     for worker, deps in ANALYSIS_DEPENDENCIES.items():

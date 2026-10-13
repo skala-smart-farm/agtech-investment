@@ -22,7 +22,7 @@ from tools.grounding import norm
 from tools.sources import SourceRegistry
 
 AGENT = "decision"
-HOLD_TYPES = ("Deal-killer", "창업자 점수 평균 미만", "동종 평균 이하")   # 앞선 것 우선
+HOLD_TYPES = ("근거 부족", "Deal-killer", "창업자 점수 평균 미만", "동종 평균 이하")   # 앞선 것 우선
 UNDISCLOSED = ("비공개", "미공개", "undisclosed", "비밀", "n/a")
 
 __all__ = ["decision_node", "load_rubric", "load_reference", "write_reference_class", "write_threshold_sensitivity",
@@ -492,6 +492,9 @@ def decision_node(state: dict) -> dict:
         # 3) 결정과 보고서 재료
         founder_c = _founder_c(criteria)
         decision, hold_type, reasons = decide_rule(M, founder_c, killers, unknown_ratio, cfg)
+        if shortfall := state.get("evidence_shortfall"):  # Supervisor 근거 충분성 검토 미통과 → 점수와 관계없이 보류
+            decision, hold_type = "보류", "근거 부족"
+            reasons = [f"재조사 후에도 근거 부족: {shortfall}", *[r for r in reasons if r]]
         flip = (flip_conditions(rows, ref["mean"], rubric, cfg, founder_c >= dc.founder_min_c, killers)
                 if decision == "보류" else None)
         ranking, target_rank, peer_n = _ranking(
@@ -518,6 +521,8 @@ def decision_node(state: dict) -> dict:
                   "hold_type": hold_type, "multiplier": M, "score100": score100, "reasons": reasons, "flip": flip,
                   "criteria": criteria, "scorecard": scorecard, "founder": state.get("founder"), "tech": state.get("tech"),
                   "market": state.get("market"), "competition": state.get("competition"), "profile": c}
+    if state.get("evidence_shortfall"):
+        evaluation["evidence_shortfall"] = state["evidence_shortfall"]
     out = {"scorecard": scorecard, "decision": decision, "evaluations": [evaluation], "log": [msg]}
     from graph.routes import stops_on_invest
 

@@ -177,7 +177,7 @@ def test_supervisor_reworks_insufficient_view(supervisor_llm, target):
         assert f.calls.count("competition") == 2
 
 
-def test_supervisor_excludes_candidate_when_rework_exhausted(supervisor_llm, set_cfg):
+def test_supervisor_holds_candidate_when_rework_exhausted(supervisor_llm, set_cfg):
     from agents.supervisor import EvidenceReview
     from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
 
@@ -189,12 +189,15 @@ def test_supervisor_excludes_candidate_when_rework_exhausted(supervisor_llm, set
                        rework_agent="market", queries=["A 시장 수요 실측"]),
     ])
     f = Fakes([["A", "B"]])
-    out = build_supervisor_graph(supervisor_nodes(f)).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
+    nodes = supervisor_nodes(f)
+    shortfalls = []
+    real_decide = nodes["decide"]
+    nodes["decide"] = lambda s: shortfalls.append(s.get("evidence_shortfall")) or real_decide(s)
+    out = build_supervisor_graph(nodes).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
     assert f.calls.count("market") == 3  # A 2회(재조사 포함) + B 1회
-    assert f.calls.count("decide") == 1 and f.calls.count("report") == 1  # A 는 제외, B 만 평가하고 보고서까지
-    assert [e["name"] for e in out["evaluations"]] == ["B"]
-    assert [x["candidate"] for x in out["supervisor_excluded"]] == ["A"]
-    assert out["supervisor_final_review"]["excluded_candidates"] == ["A"]
+    assert f.calls.count("decide") == 2 and f.calls.count("report") == 1  # A 도 빼지 않고 채점한다
+    assert [e["name"] for e in out["evaluations"]] == ["A", "B"] and not out.get("supervisor_excluded")
+    assert shortfalls[0].startswith("재조사 한도 1회 소진") and shortfalls[1] is None  # A 만 근거 부족 보류로 채점
     assert out["supervisor_reviews"]["A"]["reason"] == "추가 검색 후에도 시장 수요 확인 불가"
 
 
@@ -231,8 +234,8 @@ def test_supervisor_handles_repeated_rework_queries(supervisor_llm, new_queries,
     f = Fakes([["A"]])
     out = build_supervisor_graph(supervisor_nodes(f)).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
     assert [query for _, query in supervisor_llm.searches] == expected_searches
-    assert f.calls.count("decide") == int(sufficient) and f.calls.count("report") == 1
-    assert bool(out.get("supervisor_excluded")) is not sufficient
+    assert f.calls.count("decide") == 1 and f.calls.count("report") == 1 and not out.get("supervisor_excluded")
+    assert out["supervisor_reviews"]["A"]["sufficient"] is sufficient
     assert any(p.get("feedback") for p in supervisor_llm.prompts) == (new_queries == ["A 고객 확인"])
 
 
@@ -568,7 +571,7 @@ def test_app_supervisor_writes_run_log(fake_app, supervisor_llm, monkeypatch):
     assert log["supervisor"]["final_review"]["sufficient"]
 
 
-def test_app_excluded_candidate_is_not_in_reference(fake_app, supervisor_llm, monkeypatch, set_cfg):
+def test_app_shortfall_candidate_stays_in_reference(fake_app, supervisor_llm, monkeypatch, set_cfg):
     from agents.supervisor import EvidenceReview
     from graph import supervisor
 
@@ -584,8 +587,8 @@ def test_app_excluded_candidate_is_not_in_reference(fake_app, supervisor_llm, mo
         [e["name"] for e in state["evaluations"]]) or {})
     app.main(["--calibrate"])
     log = json.loads((tmp / "outputs/calibration/run_log.json").read_text(encoding="utf-8"))
-    assert [x["candidate"] for x in log["supervisor"]["excluded"]] == ["A"]
-    assert calibrated and "A" not in calibrated[0]  # 제외된 후보는 기준 집단에 들어가지 않는다
+    assert not log["supervisor"]["excluded"] and not log["supervisor"]["reviews"]["A"]["sufficient"]
+    assert calibrated and calibrated[0] == ["A", "B", "C"]  # 근거 부족 후보도 빼지 않고 기준 집단에 들어간다
 
 
 def test_app_calibrate_writes_reference_class(fake_app, monkeypatch):
