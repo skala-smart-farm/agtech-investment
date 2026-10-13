@@ -1,11 +1,20 @@
 """AgTech 스타트업 투자 평가 에이전트 실행 스크립트.
 
     python app.py                  # 탐색 → 창업자·기술·시장성·경쟁사 → 투자 판단 → 보고서(PDF)
+<<<<<<< HEAD
     python app.py --fresh          # 캐시 없이 검색·LLM 을 새로 호출
     python app.py --offline        # 저장된 캐시만 쓰고 API 키 없이 실행
     python app.py --calibrate      # 평가 상한까지 평가해 동종 기준 집단(data/reference_class.json)을 만든다 (보고서 없음)
     python app.py --out DIR        # 결과를 DIR 에 쓴다 (제출용 파일은 만들지 않음)
     python app.py --graph-only     # 그래프 그림만 생성
+=======
+    python app.py --offline        # 재현 테스트: 저장소의 캐시(replay/)만 쓰고 API 키 없이 실행
+    python app.py --fresh --supervisor --out outputs/supervisor_report  # Supervisor가 분석 순서를 선택
+    python app.py --calibrate      # 보정 실행: 투자여도 멈추지 않고 평가 상한까지 평가해 동종 기준 집단
+                                          #   (data/reference_class.json)과 기준 배수 민감도를 만든다. 보고서는 만들지 않는다
+    python app.py --threshold 1.30 --out outputs/scenario_hold   # 시나리오 실행: 기준 배수만 바꿔 다른 보고서 모드 확인
+    python app.py --graph-only     # 그래프 그림(docs/architecture.png, docs/architecture_langgraph.png)만 생성
+>>>>>>> multi-agent-orchestration
 """
 from __future__ import annotations
 
@@ -60,6 +69,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--graph-only", action="store_true")
     parser.add_argument("--fresh", action="store_true",
                         help="저장소에 포함된 재현용 캐시(replay/) 대신 웹·LLM 을 새로 호출해 최신 정보로 평가")
+    parser.add_argument("--supervisor", action="store_true",
+                        help="각 에이전트 실행 후 Supervisor로 돌아가 LLM이 가능한 다음 분석을 선택")
     parser.add_argument("--offline", action="store_true",
                         help="재현 테스트: 캐시에 없는 검색·LLM 호출이 생기면 바로 실패 (API 키 없이 실행 가능)")
     parser.add_argument("--retry-failed", action="store_true",
@@ -195,9 +206,18 @@ def main(argv: list[str] | None = None) -> None:
     cfg = get_config()
     base_out = cfg.report.output_dir
     mode = apply_options(args, cfg)
+<<<<<<< HEAD
     if args.fresh or args.retry_failed:
+=======
+    if args.fresh or args.retry_failed or (args.supervisor and not args.offline and not args.graph_only):
+>>>>>>> multi-agent-orchestration
         require_keys()
-    app = build_graph()
+    if args.supervisor:
+        from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
+
+        app = build_supervisor_graph()
+    else:
+        app = build_graph()
     if args.graph_only:
         print(save_graph_image(app))
         return
@@ -210,12 +230,21 @@ def main(argv: list[str] | None = None) -> None:
     print(f"== AgTech 스타트업 투자 평가 시작 ({run_date}, 모드 {mode}, 기준 배수 {cfg.decision.threshold}, "
           f"생성 {cfg.models.generator}, 판정 {cfg.models.judge}, 임베딩 {cfg.embedding.model}, 캐시 {cfg.cache.dir}/) ==")
     print(search_notice(args, cfg))
-    state = app.invoke(initial_state(cfg, run_date), {"recursion_limit": cfg.workflow.recursion_limit})
+    recursion_limit = supervisor_recursion_limit() if args.supervisor else cfg.workflow.recursion_limit
+    state = app.invoke(initial_state(cfg, run_date), {"recursion_limit": recursion_limit})
     elapsed = round(time.time() - t0, 1)
 
     out_dir = cfg.report.output_dir
     run_log = build_run_log(state, cfg, mode=mode, run_date=run_date, elapsed=elapsed)
+<<<<<<< HEAD
     _write_json(f"{out_dir}/run_log.json", run_log)
+=======
+    run_log["orchestration"] = "supervisor" if args.supervisor else "sequential"
+    if args.supervisor:
+        run_log["supervisor"] = {"reviews": state.get("supervisor_reviews", {}),
+                                 "final_review": state.get("supervisor_final_review", {})}
+    _write_json(f"{out_dir}/run_log.json", run_log)  # 보정 파일을 쓰다 실패해도 평가 기록은 남도록 먼저 저장
+>>>>>>> multi-agent-orchestration
     cost = TRACKER.summary()
     if cost.get("api_calls"):
         with open(path(f"{base_out}/cost_history.jsonl"), "a", encoding="utf-8") as f:
@@ -225,7 +254,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"== 완료 ({elapsed}초, 종료 사유 {state.get('end_reason')}, LLM {cost}) ==")
 
     report = state.get("report") or {}
-    if mode == "calibrate":
+    if mode == "calibrate" and state.get("end_reason") != "insufficient_evidence":
         run_log["calibration"] = finish_calibration(state, cfg, run_date)
         _write_json(f"{out_dir}/run_log.json", run_log)
     elif report.get("submit_pdf") or report.get("pdf"):
@@ -234,6 +263,8 @@ def main(argv: list[str] | None = None) -> None:
             print(f"검증: {json.dumps(report['checks'], ensure_ascii=False)}")
     else:
         print(f"보고서를 만들지 못했습니다. {out_dir}/run_log.json 을 확인하세요.")
+    if state.get("end_reason") == "insufficient_evidence":
+        raise SystemExit(2)  # 근거 부족을 성공 실행으로 처리하거나 보정 기준을 갱신하지 않는다.
 
 
 if __name__ == "__main__":
