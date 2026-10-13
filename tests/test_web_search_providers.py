@@ -197,15 +197,15 @@ def test_both_keys_keep_order_and_fall_through_without_retry(live, monkeypatch):
 
 
 def test_startup_notice_warns_when_serper_missing(live):
-    """--fresh 에서 SERPER_API_KEY 가 없으면 시작 줄 아래에 'Tavily 만 씀' 경고와 요청 제한 시간을 알린다."""
+    """새로 호출하는 실행에서 SERPER_API_KEY 가 없으면 시작 줄 아래에 'Tavily 만 씀' 경고와 요청 제한 시간을 알린다."""
     import argparse
 
     import app
 
     cfg = ws.get_config()
-    fresh = app.search_notice(argparse.Namespace(fresh=True, retry_failed=False), cfg)
+    fresh = app.search_notice(argparse.Namespace(replay=False, offline=False, retry_failed=False), cfg)
     assert "Tavily" in fresh and "SERPER_API_KEY" in fresh and f"{cfg.search.timeout_sec}초" in fresh
-    replay = app.search_notice(argparse.Namespace(fresh=False, retry_failed=False), cfg)
+    replay = app.search_notice(argparse.Namespace(replay=True, offline=False, retry_failed=False), cfg)
     assert replay.startswith("   검색: 재현용 캐시") and "SERPER_API_KEY" not in replay  # 재현 실행은 키와 무관
 
 
@@ -215,5 +215,5 @@ def test_startup_notice_without_warning_when_both_keys(live, monkeypatch):
     import app
 
     monkeypatch.setenv("SERPER_API_KEY", "serper-test")
-    msg = app.search_notice(argparse.Namespace(fresh=True, retry_failed=False), ws.get_config())
+    msg = app.search_notice(argparse.Namespace(replay=False, offline=False, retry_failed=False), ws.get_config())
     assert "Serper → Tavily" in msg and "SERPER_API_KEY 가 없어" not in msg

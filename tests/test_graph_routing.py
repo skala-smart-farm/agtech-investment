@@ -531,6 +531,7 @@ def fake_app(monkeypatch, tmp_path):
 
     fakes = Fakes([["A", "B", "C"]], decisions={"B": "투자"})
     monkeypatch.setattr(app, "_check_browser", lambda: None)
+    monkeypatch.setattr(app, "require_keys", lambda: None)
     monkeypatch.setattr(app, "build_graph", lambda: build_graph(fakes.nodes()))
     monkeypatch.setattr(app, "get_run_date", lambda: "2026-09-30")
     monkeypatch.setattr(app, "path", tmp_path_of)
@@ -539,7 +540,7 @@ def fake_app(monkeypatch, tmp_path):
 
 def test_app_scenario_run_writes_run_log(fake_app):
     app, fakes, tmp = fake_app
-    app.main(["--threshold", "1.3", "--out", "outputs/scenario_hold"])
+    app.main(["--sequential", "--threshold", "1.3", "--out", "outputs/scenario_hold"])
     log = json.loads((tmp / "outputs/scenario_hold/run_log.json").read_text(encoding="utf-8"))
     assert log["mode"] == "scenario" and log["threshold"] == 1.3 and log["end_reason"] == "exhausted"
     assert log["report"]["scenario"] is True and log["report"]["threshold"] == 1.3  # 노드가 바뀐 설정을 읽었다
@@ -557,7 +558,7 @@ def test_app_supervisor_writes_run_log(fake_app, supervisor_llm, monkeypatch):
     monkeypatch.setattr(supervisor, "build_supervisor_graph", lambda: real_builder(supervisor_nodes(fakes)))
     checked = []
     monkeypatch.setattr(app, "require_keys", lambda: checked.append(True))
-    app.main(["--fresh", "--supervisor", "--out", "outputs/supervisor_report"])
+    app.main(["--out", "outputs/supervisor_report"])  # 기본 = Supervisor, 새로 호출
     log = json.loads((tmp / "outputs/supervisor_report/run_log.json").read_text(encoding="utf-8"))
     assert checked == [True]
     assert log["orchestration"] == "supervisor" and log["evaluated"] == 3
@@ -581,7 +582,7 @@ def test_app_excluded_candidate_is_not_in_reference(fake_app, supervisor_llm, mo
     calibrated = []
     monkeypatch.setattr(app, "finish_calibration", lambda state, *a: calibrated.append(
         [e["name"] for e in state["evaluations"]]) or {})
-    app.main(["--fresh", "--supervisor", "--calibrate"])
+    app.main(["--calibrate"])
     log = json.loads((tmp / "outputs/calibration/run_log.json").read_text(encoding="utf-8"))
     assert [x["candidate"] for x in log["supervisor"]["excluded"]] == ["A"]
     assert calibrated and "A" not in calibrated[0]  # 제외된 후보는 기준 집단에 들어가지 않는다
@@ -604,7 +605,7 @@ def test_app_calibrate_writes_reference_class(fake_app, monkeypatch):
     monkeypatch.setattr(decision, "write_reference_class", write_reference_class)
     monkeypatch.setattr(decision, "write_threshold_sensitivity", write_threshold_sensitivity)
     monkeypatch.setattr(app, "v1_evaluated_names", lambda: ["C", "B", "A"])
-    app.main(["--calibrate"])
+    app.main(["--sequential", "--calibrate"])
 
     assert fakes.calls.count("decide") == 3  # B 가 투자여도 멈추지 않고 소진까지
     assert got["ref"] == (["A", "B", "C"], str(tmp / "data/reference_class.json"), "2026-09-30")

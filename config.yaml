@@ -173,10 +173,11 @@ evaluation:                            # 보고서 품질 평가 (Groundedness·
   max_revisions: 2                     # 미달이면 보고서를 다시 쓰는 횟수 상한
   min_distinct_sources: 3              # 편향 통제: 인용한 서로 다른 출처 수 하한
   max_single_source_share: 0.5         # 편향 통제: 한 출처가 인용에서 차지하는 비율 상한
+  min_third_party_share: 0.5           # 편향 통제: 인용 중 회사 자체 사이트가 아닌 출처 비율 하한
   judge_max_chars: 12000               # LLM Judge 에 넘기는 보고서 최대 글자 수
 
 cache:
-  dir: replay                          # 캐시 폴더 (--fresh 면 cache_fresh/)
+  dir: cache_fresh                     # 새로 호출한 검색·LLM 응답 저장 폴더 (같은 입력은 재사용). --replay 면 지난 제출본 replay/
   llm: true                            # LLM 응답 캐시
   search: true                         # 웹 검색 결과 캐시
   embeddings: true                     # 문서 임베딩 캐시

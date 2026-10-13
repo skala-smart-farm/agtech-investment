@@ -1249,7 +1249,7 @@ def report_node(state: dict) -> dict:
         if pool["ref_gap"]:  # 기준 집단이 이번 평가와 다르면 동종 순위 대신 이번 평가 안의 순위
             peer = f"평가 {len(evals)}곳 중 {ranked.index(target) + 1}위"
             print(f"[보고서] 주의: 평가한 {len(pool['ref_gap']['unseen'])}곳이 동종 기준 집단에 없습니다 — "
-                  "새 데이터라면 같은 캐시로 python app.py --fresh --calibrate 를 먼저 실행하세요")
+                  "새 데이터라면 같은 캐시로 python app.py --calibrate 를 먼저 실행하세요")
         conclusion = (f"{target['name']} 투자 추천(실사 조건부) — 동종 평균 대비 {_s1(sc['multiplier'])}"
                       f"(동종 평균 100 초과, 창업자 기준 {_s1(sc.get('founder_c'))}), {peer}")
         pick = (f"{len(evals)}곳 평가 → 투자 기준 통과 {len(invested)}곳 중 배수 1위" if len(evals) > 1

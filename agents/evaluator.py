@@ -12,8 +12,10 @@ from urllib.parse import urlparse
 from pydantic import BaseModel, Field
 
 from core.config import get_config
+from core.judge import company_keys
 from core.llm_bounded import bounded
 from core.prompts import render
+from tools.grounding import norm
 
 ITEMS = ("groundedness", "neutrality", "bias_control")
 LABELS = {"groundedness": "Groundedness", "neutrality": "중립성", "bias_control": "편향 통제"}
@@ -38,8 +40,14 @@ def _source_key(s: dict) -> str:
     return urlparse(s.get("url") or "").netloc.removeprefix("www.") or s.get("site") or "web"
 
 
-def rule_checks(report: dict, md: str, registry: dict) -> dict[str, list[str]]:
-    """1안: 형식으로 확인할 수 있는 부분만 검사한다. 반환 {항목: 실패 사유 목록}."""
+def _own_site(s: dict, company: list[str]) -> bool:
+    """회사 자체 사이트 근거인지 (호스트에 회사 이름이 들어 있음)."""
+    host = norm(urlparse(s.get("url") or "").netloc)
+    return s.get("kind") == "web" and any(len(k) >= 3 and k in host for k in company)
+
+
+def rule_checks(report: dict, md: str, registry: dict, company: list[str] = ()) -> dict[str, list[str]]:
+    """1안: 형식으로 확인할 수 있는 부분만 검사한다. company 는 보고서 대상 회사 이름(정규화). 반환 {항목: 실패 사유 목록}."""
     ev = get_config().evaluation
     checks = report.get("checks") or {}
     fails: dict[str, list[str]] = {k: [] for k in ITEMS}
@@ -53,14 +61,23 @@ def rule_checks(report: dict, md: str, registry: dict) -> dict[str, list[str]]:
             if not any(t in sec.splitlines()[0] for t in NO_CITE_SECTIONS) and not NUM_CITE.search(sec)]
     if bare:
         fails["groundedness"].append(f"인용이 없는 장: {', '.join(bare)}")
+    if checks.get("chapter_refs_ok") is False:
+        fails["groundedness"].append("SUMMARY 의 장 참조(→n장)가 없는 장을 가리킴")
+    if checks.get("conclusion_matches_scorecard") is False:
+        fails["groundedness"].append("결론 문장이 평가표 결과와 다름")
+    if checks.get("assumptions_labeled") is False:
+        fails["groundedness"].append("ROI 가정 수치에 '가정' 표기가 없음")
 
     if checks.get("consistency_violations"):
         fails["neutrality"].append(f"평가표와 어긋난 단정 {len(checks['consistency_violations'])}건: "
                                    f"{checks['consistency_violations'][0]}")
     if checks.get("banned_hits"):
         fails["neutrality"].append(f"SUMMARY 금지 표현: {', '.join(checks['banned_hits'])}")
+    if checks.get("summary_rule_violations"):
+        fails["neutrality"].append(f"SUMMARY 규칙 위반: {'; '.join(checks['summary_rule_violations'])}")
 
-    keys = [_source_key(s) for i in report.get("cited_ids") or [] if (s := registry.get(i))]
+    cited = [s for i in report.get("cited_ids") or [] if (s := registry.get(i))]
+    keys = [_source_key(s) for s in cited]
     distinct = set(keys)
     if len(distinct) < ev.min_distinct_sources:
         fails["bias_control"].append(f"서로 다른 출처 {len(distinct)}곳 < {ev.min_distinct_sources}곳")
@@ -69,6 +86,10 @@ def rule_checks(report: dict, md: str, registry: dict) -> dict[str, list[str]]:
         share = keys.count(top) / len(keys)
         if share > ev.max_single_source_share:
             fails["bias_control"].append(f"단일 출처 편중: {top} {share:.0%} > {ev.max_single_source_share:.0%}")
+    if cited:
+        third = sum(not _own_site(s, company) for s in cited) / len(cited)
+        if third < ev.min_third_party_share:
+            fails["bias_control"].append(f"제3자 출처 비율 {third:.0%} < {ev.min_third_party_share:.0%} (회사 자체 사이트 편중)")
     return fails
 
 
@@ -89,7 +110,9 @@ def evaluate_node(state: dict) -> dict:
         return {"report_evaluation": result, "log": [f"[품질 평가] {result['feedback']}"]}
 
     md = Path(report["md"]).read_text(encoding="utf-8")
-    fails = rule_checks(report, md, state.get("registry") or {})
+    target = next((e for e in state.get("evaluations") or [] if e.get("name") == report.get("target")), {})
+    company = company_keys({**(target.get("profile") or {}), "name": target.get("name")}) if target else []
+    fails = rule_checks(report, md, state.get("registry") or {}, company)
     j = judge(md)
     items = {k: not fails[k] and getattr(j, k) for k in ITEMS}
     passed = all(items.values())

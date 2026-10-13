@@ -1,9 +1,9 @@
 """AgTech 스타트업 투자 평가 에이전트 실행 스크립트.
 
-    python app.py                  # 탐색 → 창업자·기술·시장성·경쟁사 → 투자 판단 → 보고서(PDF)
-    python app.py --fresh          # 캐시 없이 검색·LLM 을 새로 호출
-    python app.py --supervisor     # Supervisor 그래프로 실행 (분석 순서·재조사를 Supervisor 가 정함)
-    python app.py --offline        # 저장된 캐시만 쓰고 API 키 없이 실행
+    python app.py                  # Supervisor 그래프로 새로 평가 (검색·LLM 을 새로 호출, 결과는 cache_fresh/ 에 저장)
+    python app.py --sequential     # 예전 순차 그래프 (탐색 → 창업자 → 기술 → 시장성 → 경쟁사 → 투자 판단 → 보고서)
+    python app.py --replay         # 지난 제출본 캐시(replay/)로 실행
+    python app.py --offline        # 저장된 캐시만 쓰고 API 키 없이 실행 (보통 --replay 와 함께)
     python app.py --calibrate      # 평가 상한까지 평가해 동종 기준 집단(data/reference_class.json)을 만든다 (보고서 없음)
     python app.py --out DIR        # 결과를 DIR 에 쓴다 (제출용 파일은 만들지 않음)
     python app.py --graph-only     # 그래프 그림만 생성
@@ -60,10 +60,10 @@ def _check_browser() -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--graph-only", action="store_true")
-    parser.add_argument("--fresh", action="store_true",
-                        help="저장소에 포함된 재현용 캐시(replay/) 대신 웹·LLM 을 새로 호출해 최신 정보로 평가")
-    parser.add_argument("--supervisor", action="store_true",
-                        help="각 에이전트 실행 후 Supervisor로 돌아가 LLM이 가능한 다음 분석을 선택")
+    parser.add_argument("--replay", action="store_true",
+                        help="새로 호출하지 않고 지난 제출본 캐시(replay/)로 실행")
+    parser.add_argument("--sequential", action="store_true",
+                        help="Supervisor 대신 예전 순차 그래프로 실행")
     parser.add_argument("--offline", action="store_true",
                         help="재현 테스트: 캐시에 없는 검색·LLM 호출이 생기면 바로 실패 (API 키 없이 실행 가능)")
     parser.add_argument("--retry-failed", action="store_true",
@@ -80,8 +80,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def apply_options(args: argparse.Namespace, cfg) -> str:
     """실행 옵션을 설정에 반영하고 실행 모드(main | calibrate | scenario)를 돌려준다."""
-    if args.fresh:
-        cfg["cache"]["dir"] = "cache_fresh"
+    if args.replay:
+        cfg["cache"]["dir"] = "replay"
     if args.threshold is not None:
         cfg["decision"]["threshold"] = args.threshold
     if args.calibrate:
@@ -99,7 +99,7 @@ def apply_options(args: argparse.Namespace, cfg) -> str:
 def search_notice(args: argparse.Namespace, cfg) -> str:
     """검색 공급자 안내 한 줄."""
     names = " → ".join(p.capitalize() for p in web_search_mod.active_providers()) or "없음"
-    if not (args.fresh or args.retry_failed):
+    if args.offline or (args.replay and not args.retry_failed):
         return f"   검색: 재현용 캐시({cfg.cache.dir}/)에서 읽음 — 검색 키·공급자와 무관 (공급자 {names})"
     msg = f"   검색 공급자: {names} · 요청 제한 {cfg.search.get('timeout_sec', 30)}초"
     if web_search_mod.active_providers() == ["tavily"]:
@@ -208,9 +208,10 @@ def main(argv: list[str] | None = None) -> None:
     cfg = get_config()
     base_out = cfg.report.output_dir
     mode = apply_options(args, cfg)
-    if args.fresh or args.retry_failed or (args.supervisor and not args.offline and not args.graph_only):
+    supervised = not args.sequential
+    if not (args.offline or args.graph_only):
         require_keys()
-    if args.supervisor:
+    if supervised:
         from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
 
         app = build_supervisor_graph()
@@ -228,9 +229,9 @@ def main(argv: list[str] | None = None) -> None:
     print(f"== AgTech 스타트업 투자 평가 시작 ({run_date}, 모드 {mode}, 기준 배수 {cfg.decision.threshold}, "
           f"생성 {cfg.models.generator}, 판정 {cfg.models.judge}, 임베딩 {cfg.embedding.model}, 캐시 {cfg.cache.dir}/) ==")
     print(search_notice(args, cfg))
-    recursion_limit = supervisor_recursion_limit() if args.supervisor else cfg.workflow.recursion_limit
+    recursion_limit = supervisor_recursion_limit() if supervised else cfg.workflow.recursion_limit
     run_id = uuid.uuid4().hex[:12]
-    orchestration = "supervisor" if args.supervisor else "sequential"
+    orchestration = "supervisor" if supervised else "sequential"
     print(f"   run_id {run_id} (run_log·LangSmith metadata 의 연결 키)")
     state = app.invoke(initial_state(cfg, run_date, run_id), invoke_config(run_id, mode, orchestration, recursion_limit))
     elapsed = round(time.time() - t0, 1)
@@ -238,7 +239,7 @@ def main(argv: list[str] | None = None) -> None:
     out_dir = cfg.report.output_dir
     run_log = build_run_log(state, cfg, mode=mode, run_date=run_date, elapsed=elapsed)
     run_log["orchestration"] = orchestration
-    if args.supervisor:
+    if supervised:
         run_log["supervisor"] = {"steps": state.get("supervisor_steps"), "reviews": state.get("supervisor_reviews", {}),
                                  "final_review": state.get("supervisor_final_review", {}),
                                  "excluded": state.get("supervisor_excluded", [])}
@@ -249,7 +250,7 @@ def main(argv: list[str] | None = None) -> None:
     if cost.get("api_calls"):
         with open(path(f"{base_out}/cost_history.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps({"run_date": run_date, "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                                "elapsed_sec": elapsed, "fresh": args.fresh, "mode": mode, **cost},
+                                "elapsed_sec": elapsed, "fresh": not args.replay, "mode": mode, **cost},
                                ensure_ascii=False) + "\n")
     print(f"== 완료 ({elapsed}초, 종료 사유 {state.get('end_reason')}, LLM {cost}) ==")
 

@@ -22,8 +22,9 @@ MD = """# 보고서
 """
 REG = {"W1": {"kind": "web", "url": "https://a.com/x"}, "W2": {"kind": "web", "url": "https://b.com/y"},
        "D1": {"kind": "doc", "publisher": "농촌진흥청"}}
-GOOD = {"checks": {"refs_match_citations": True, "reference_format_ok": True, "consistency_violations": [],
-                   "banned_hits": []}, "cited_ids": ["W1", "W2", "D1"]}
+GOOD = {"checks": {"refs_match_citations": True, "reference_format_ok": True, "chapter_refs_ok": True,
+                   "conclusion_matches_scorecard": True, "assumptions_labeled": True, "consistency_violations": [],
+                   "banned_hits": [], "summary_rule_violations": []}, "cited_ids": ["W1", "W2", "D1"]}
 
 
 def test_rules_pass_on_well_formed_report():
@@ -65,3 +66,14 @@ def test_hybrid_needs_both_rule_and_judge(tmp_path, monkeypatch, set_cfg):
 def test_no_report_body_is_not_evaluated():
     out = E.evaluate_node({"report": {"mode": "calibrate"}})
     assert out["report_evaluation"]["passed"] and E.route_after_evaluate(out) == "end"
+
+
+def test_strengthened_rules():
+    checks = {**GOOD["checks"], "conclusion_matches_scorecard": False, "assumptions_labeled": False,
+              "summary_rule_violations": ["SUMMARY 570자 > 560자"]}
+    reg = {**REG, "W3": {"kind": "web", "url": "https://www.acmefarm.com/about"},
+           "W4": {"kind": "web", "url": "https://acmefarm.com/news"}}
+    fails = E.rule_checks({"checks": checks, "cited_ids": ["W3", "W4", "W1"]}, MD, reg, ["acmefarm"])
+    assert any("결론 문장" in x for x in fails["groundedness"]) and any("가정" in x for x in fails["groundedness"])
+    assert any("SUMMARY 규칙 위반" in x for x in fails["neutrality"])
+    assert any("제3자 출처 비율 33%" in x for x in fails["bias_control"])
