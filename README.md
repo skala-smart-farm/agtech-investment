@@ -75,7 +75,7 @@ python app.py              # API 키 없이 제출 보고서 재현 → outputs/
 - 테스트 : `python -m pytest`
 
 ### Supervisor 패턴 실험
-`codex/supervisor-agent` 브랜치에서 `--supervisor`를 붙이면 각 에이전트가 작업 후 Supervisor로 돌아온다.
+`agtech-investment-add-Supervisor` 브랜치에서 `--supervisor`를 붙이면 각 에이전트가 작업 후 Supervisor로 돌아온다.
 Supervisor는 현재 수집된 관점을 보고 LLM으로 다음 작업과 이유를 선택한다.
 Agent-as-Tool과 Swarm은 사용하지 않으며, 각 에이전트는 기존 LangGraph 노드로 실행한다.
 하위 에이전트는 Supervisor가 만든 입력만 받고 결과를 Supervisor로 반환한다. 하위 에이전트 간 직접 간선이나 호출은 없다.
