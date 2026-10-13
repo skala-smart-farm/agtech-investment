@@ -1288,8 +1288,11 @@ def report_node(state: dict) -> dict:
                 ("재검토", f"가장 가까운 후보 {target['name']}: {_flip_text(target)}(→2장)"), ("요청", request)]
 
     # 1) 초안 → SUMMARY 규칙 + 평가표 일치 검사. 어긋나면 이유를 붙여 다시 쓴다
+    #    품질 평가 노드가 미달로 돌려보낸 경우 그 고칠 점을 첫 초안부터 반영한다
     max_rw = int(cfg.report.get("max_rewrites", 2))
-    draft, feedback, probs, rewrites = None, "", [], 0
+    prev = state.get("report_evaluation") or {}
+    eval_fb = f"품질 평가 미달 — 다음을 고쳐라:\n{prev['feedback']}\n" if prev.get("retry") else ""
+    draft, feedback, probs, rewrites = None, eval_fb, [], 0
     for attempt in range(max_rw + 1):
         draft = bounded(schema, kind="report").invoke(render("report", **ctx, feedback=feedback, shorten=False))
         draft = schema.model_validate(_fix_cites(draft.model_dump()))
@@ -1299,7 +1302,7 @@ def report_node(state: dict) -> dict:
             break
         if attempt < max_rw:
             rewrites += 1
-            feedback = "직전 초안의 문제를 모두 고쳐라:\n- " + "\n- ".join(probs)
+            feedback = eval_fb + "직전 초안의 문제를 모두 고쳐라:\n- " + "\n- ".join(probs)
 
     out_dir, pdf_path, _ = _out_paths(cfg)
     meta = (f"{cfg.domain.name} · 평가 {len(evals)}곳 · 기준 배수 {sc['threshold']:.2f}(동종 평균 = 1.00) · 작성일 {run_date}"

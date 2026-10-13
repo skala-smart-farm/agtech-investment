@@ -167,6 +167,13 @@ supervisor:
   max_reworks_per_candidate: 2          # 근거 부족이면 최대 2회 재조사. 소진해도 부족하면 그 후보는 제외
   context_summary_chars: 1800          # 충분성 검토에 넘기는 관점별 분석 요약 최대 글자 수
   context_source_chars: 900            # 충분성 검토에 넘기는 근거 원문 최대 글자 수
+  max_steps: 150                       # Supervisor 판단 횟수 상한 (후보 10곳 × 재조사 포함 최대 약 12회). 닿으면 지금까지 평가한 후보로 보고서
+
+evaluation:                            # 보고서 품질 평가 (Groundedness·중립성·편향 통제, 규칙 검사 + LLM Judge)
+  max_revisions: 2                     # 미달이면 보고서를 다시 쓰는 횟수 상한
+  min_distinct_sources: 3              # 편향 통제: 인용한 서로 다른 출처 수 하한
+  max_single_source_share: 0.5         # 편향 통제: 한 출처가 인용에서 차지하는 비율 상한
+  judge_max_chars: 12000               # LLM Judge 에 넘기는 보고서 최대 글자 수
 
 cache:
   dir: replay                          # 캐시 폴더 (--fresh 면 cache_fresh/)

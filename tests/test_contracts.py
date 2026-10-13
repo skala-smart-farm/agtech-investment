@@ -10,9 +10,13 @@ import yaml
 
 from core.config import ROOT, get_config
 
-C1_KEYS = ["domain", "run_date", "registry", "discovery_rounds", "raw_candidates", "seen", "screened", "queue",
-           "current", "iterations", "founder", "tech", "market", "competition", "market_cache", "scorecard",
-           "decision", "evaluations", "end_reason", "report", "rag_traces", "log"]
+PAYLOAD = ["domain", "run_date", "registry", "raw_candidates", "screened", "current", "founder", "tech", "market",
+           "competition", "market_cache", "scorecard", "evaluations", "report"]
+CONTROL = ["discovery_rounds", "seen", "queue", "iterations", "decision", "supervisor_next", "supervisor_task",
+           "view_progress", "supervisor_reworks", "supervisor_steps", "supervisor_reviews", "supervisor_excluded",
+           "supervisor_final_review", "report_revisions", "report_evaluation", "end_reason"]
+TRACE = ["run_id", "last_error", "rag_traces", "log"]
+C1_KEYS = PAYLOAD + CONTROL + TRACE  # ① 페이로드 · ② 제어 · ③ 추적·복구 순서
 DISCOVERY_IN = {"domain", "run_date", "registry", "discovery_rounds", "seen", "queue", "iterations"}
 DISCOVERY_OUT = {"registry", "discovery_rounds", "raw_candidates", "seen", "screened", "queue", "current", "iterations",
                  "founder", "tech", "market", "competition", "scorecard", "end_reason", "rag_traces", "log"}

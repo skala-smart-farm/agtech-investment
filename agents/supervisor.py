@@ -1,7 +1,11 @@
-"""관점별 동적 위임 → 근거 충분성 검토 → 재조사 또는 투자 판단·보고서 승인."""
+"""관점별 동적 위임 → 근거 충분성 검토 → 재조사 또는 투자 판단·보고서 승인.
+
+관점 진행 상태는 State 의 view_progress 하나로 관리한다 (pending → collected → sufficient / insufficient / failed).
+"""
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Literal
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -17,6 +21,8 @@ Worker = Literal["founder", "tech", "market", "competition"]
 ANALYSIS_DEPENDENCIES = {
     "founder": set(), "tech": set(), "market": {"tech"}, "competition": {"founder", "tech"},
 }
+VIEWS = tuple(ANALYSIS_DEPENDENCIES)
+DONE = ("collected", "sufficient")
 # 하위 에이전트는 Supervisor가 전달한 입력만 받는다. 다른 에이전트의 State를 직접 읽지 않는다.
 WORKER_INPUTS = {
     "discover": {"discovery_rounds", "seen", "queue", "iterations"},
@@ -25,7 +31,7 @@ WORKER_INPUTS = {
     "market": {"current", "tech", "market_cache"},
     "competition": {"current", "founder", "tech"},
     "decide": {"current", "founder", "tech", "market", "competition", "iterations"},
-    "report": set(InvestmentState.__annotations__) | {"supervisor_excluded"},
+    "report": set(InvestmentState.__annotations__),
 }
 
 
@@ -49,15 +55,25 @@ def _ask(schema, template: str, context: dict):
     ])
 
 
-def _context(state: dict, completed: list[str]) -> dict:
+def _fresh_progress() -> dict:
+    return {v: {"status": "pending", "attempts": 0, "missing": [], "source_ids": []} for v in VIEWS}
+
+
+def _view_ids(state: dict, view: str) -> list[str]:
+    result = state.get(view) or {}
+    return list(dict.fromkeys(result.get("pool_ids", []) + result.get("evidence_ids", [])))
+
+
+def _context(state: dict, progress: dict) -> dict:
     c = state["current"]
     cfg = get_config().supervisor
     reg = state.get("registry", {})
+    completed = [v for v in VIEWS if progress[v]["status"] in DONE]
     ids = list(c.get("evidence_ids", []))
     views = {}
     for name in completed:
         result = state.get(name, {})
-        ids += result.get("pool_ids", []) + result.get("evidence_ids", [])
+        ids += _view_ids(state, name)
         # 문항별 인용·미확인 상태를 자르지 않고 전달한다. 긴 서술만 줄인다.
         views[name] = {"criterion": result.get("criterion", {}),
                        "evidence_ids": result.get("evidence_ids", []),
@@ -68,31 +84,35 @@ def _context(state: dict, completed: list[str]) -> dict:
                for i in dict.fromkeys(ids) if (s := reg.get(i))}
     return {"candidate": c, "completed": completed, "analysis": views, "sources": sources,
             "reworks": state.get("supervisor_reworks", 0),
-            "previous_queries": state.get("supervisor_queries", [])}
+            "previous_queries": [q for v in VIEWS for q in progress[v]["missing"]]}
 
 
-def _dispatch(state: dict, selected: str, completed: list[str], reason: str, **updates) -> dict:
-    forwarded = {"domain", "run_date", "registry"} | WORKER_INPUTS.get(selected, set())
-    merged = {**state, **updates}
-    inbox = {k: merged[k] for k in forwarded if k in merged}
-    inbox["supervisor_task"] = updates.get("supervisor_task", {})
+def _dispatch(state: dict, selected: str, reason: str, progress: dict | None = None, **updates) -> dict:
+    """다음 노드와 사유를 State 에 남긴다. 분석 관점으로 보내면 그 관점의 실행 횟수를 올린다."""
+    task = updates.pop("supervisor_task", {})
     name = (state.get("current") or {}).get("official_name", "후보 없음")
     msg = f"[Supervisor] {name}: {state.get('supervisor_next') or 'START'} → {selected} · {reason}"
-    if inbox["supervisor_task"].get("queries"):
-        msg += f" · 추가 검색 {inbox['supervisor_task']['queries']}"
+    if task.get("queries"):
+        msg += f" · 추가 검색 {task['queries']}"
     print(msg)
-    return {**updates, "supervisor_next": selected, "supervisor_completed": completed,
-            "supervisor_task": inbox["supervisor_task"], "supervisor_inbox": inbox, "log": [msg]}
+    out = {**updates, "supervisor_next": selected, "supervisor_task": task, "log": [msg]}
+    if progress is not None:
+        if selected in progress:
+            progress[selected] = {**progress[selected], "attempts": progress[selected]["attempts"] + 1}
+        out["view_progress"] = progress
+    return out
 
 
-def _finish(state: dict, completed: list[str], selected: str, **updates) -> dict:
+def _finish(state: dict, selected: str, **updates) -> dict:
     names = [e["name"] for e in state.get("evaluations", [])]
     excluded = [x["candidate"] for x in updates.get("supervisor_excluded", state.get("supervisor_excluded", []))]
     reason = "평가한 모든 후보의 관점·근거 검토 완료" if names else "적격 평가 후보 없음 — 투자 추천 없이 탐색 결과만 보고"
+    if updates.get("end_reason") == "step_limit":
+        reason = f"Supervisor 판단 상한 {get_config().supervisor.max_steps}회 도달 — 지금까지 평가한 후보로 보고"
     if excluded:
         reason += f" (근거 부족으로 제외 {len(excluded)}곳: {', '.join(excluded)})"
     final = {"sufficient": True, "reviewed_candidates": names, "excluded_candidates": excluded, "reason": reason}
-    return _dispatch(state, selected, completed, reason, supervisor_final_review=final, **updates)
+    return _dispatch(state, selected, reason, supervisor_final_review=final, **updates)
 
 
 def _new_queries(review: EvidenceReview, previous: set[str]) -> list[str]:
@@ -111,38 +131,43 @@ def _normalize(review: EvidenceReview, sources: dict) -> EvidenceReview:
     return review.model_copy(update={"evidence_ids": cited, "rework_agent": target})
 
 
-def _exclude(state: dict, completed: list[str], name: str, reason: str, **updates) -> dict:
-    """재조사로도 근거가 부족한 후보는 제외하고 다음 후보로 넘어간다 (실행 전체를 멈추지 않는다)."""
+def _exclude(state: dict, name: str, reason: str, progress: dict, **updates) -> dict:
+    """재조사로도 근거가 부족하거나 실행에 실패한 후보는 제외하고 다음 후보로 넘어간다 (실행 전체를 멈추지 않는다)."""
     excluded = [*state.get("supervisor_excluded", []), {"candidate": name, "reason": reason}]
-    updates = {**updates, "supervisor_excluded": excluded}
+    updates = {**updates, "supervisor_excluded": excluded, "view_progress": progress}
     if state.get("iterations", 0) >= get_config().workflow.max_evaluations:
-        return _finish(state, completed, "report", end_reason="max_evaluations", **updates)
-    return _dispatch(state, "discover", completed, f"근거 부족으로 제외 → 다음 후보: {reason}", **updates)
+        return _finish(state, "report", end_reason="max_evaluations", **updates)
+    return _dispatch(state, "discover", f"근거 부족으로 제외 → 다음 후보: {reason}", **updates)
 
 
 def supervisor_node(state: dict) -> dict:
+    cfg = get_config().supervisor
+    steps = state.get("supervisor_steps", 0) + 1
     previous = state.get("supervisor_next")
-    completed = list(state.get("supervisor_completed", []))
+    progress = deepcopy(state.get("view_progress") or _fresh_progress())
+    if steps > cfg.max_steps:  # 종료 보장: 판단 횟수 상한에 닿으면 지금까지 평가한 후보로 보고서
+        return _finish(state, "report", end_reason="step_limit", supervisor_steps=steps)
     if previous == "decide":
-        return _finish(state, completed, route_after_decide(state))
+        return _finish(state, route_after_decide(state), supervisor_steps=steps)
     if not state.get("current"):
         if previous == "discover":
-            return _finish(state, [], "report")
-        return _dispatch(state, "discover", [], "적격 후보 발굴")
-    if previous == "discover":
-        completed = []
-        state = {**state, "supervisor_reworks": 0, "supervisor_queries": []}
-    elif previous in ANALYSIS_DEPENDENCIES and state.get("supervisor_failed") == previous:
-        return _exclude(state, completed, state["current"]["official_name"],
-                        f"{previous} 에이전트가 분석 결과를 돌려주지 않음", supervisor_failed=None)
-    elif previous in ANALYSIS_DEPENDENCIES and previous not in completed:
-        completed.append(previous)
+            return _finish(state, "report", supervisor_steps=steps)
+        return _dispatch(state, "discover", "적격 후보 발굴", supervisor_steps=steps)
+    if previous == "discover":  # 새 후보: 관점 진행 상태와 재조사 횟수를 초기화
+        progress = _fresh_progress()
+        state = {**state, "supervisor_reworks": 0}
+    base = {"supervisor_steps": steps, "supervisor_reworks": state.get("supervisor_reworks", 0)}
+    name = state["current"]["official_name"]
+    if previous in VIEWS:
+        if state.get("last_error"):
+            progress[previous] = {**progress[previous], "status": "failed"}
+            return _exclude(state, name, f"{previous} 에이전트 실행 실패: {state['last_error']}", progress,
+                            last_error=None, **base)
+        progress[previous] = {**progress[previous], "status": "collected"}
 
-    done = set(completed)
+    done = {v for v in VIEWS if progress[v]["status"] in DONE}
     ready = [n for n, deps in ANALYSIS_DEPENDENCIES.items() if n not in done and deps <= done]
-    context = _context(state, completed)
-    reset = {"supervisor_reworks": state.get("supervisor_reworks", 0),
-             "supervisor_queries": list(state.get("supervisor_queries", []))}
+    context = _context(state, progress)
     if ready:
         if len(ready) == 1:
             selected, reason = ready[0], "미수집 관점 중 선행 분석이 완료된 작업"
@@ -151,39 +176,43 @@ def supervisor_node(state: dict) -> dict:
             selected, reason = result.next_agent, result.reason
             if selected not in ready:  # 실행할 수 없는 작업을 고르면 가능한 첫 작업으로
                 selected, reason = ready[0], f"LLM 선택({selected})이 실행 불가능해 가능한 작업으로 대체"
-        return _dispatch(state, selected, completed, reason, **reset)
+        return _dispatch(state, selected, reason, progress, **base)
 
     # 네 관점의 수집 완료만으로 보고서를 허용하지 않는다. 근거를 검토한 뒤 분기한다.
-    limit = get_config().supervisor.max_reworks_per_candidate
-    previous_queries = set(reset["supervisor_queries"])
+    limit = cfg.max_reworks_per_candidate
+    previous_queries = set(context["previous_queries"])
     review = _normalize(_ask(EvidenceReview, "supervisor_review", context), context["sources"])
     queries = _new_queries(review, previous_queries)
-    if not review.sufficient and reset["supervisor_reworks"] < limit and not (queries and review.rework_agent):
+    if not review.sufficient and base["supervisor_reworks"] < limit and not (queries and review.rework_agent):
         review = _normalize(_ask(EvidenceReview, "supervisor_review", {
             **context, "feedback": ("승인하려면 sources 에 있는 근거 ID 를 적어라. 부족하면 rework_agent 와 "
                                     "previous_queries 를 제외한 새로운 검색 질문을 제안하라."),
         }), context["sources"])
         queries = _new_queries(review, previous_queries)
-    name = state["current"]["official_name"]
-    reviews = {**state.get("supervisor_reviews", {}), name: {**review.model_dump(), **reset}}
+    reviews = {**state.get("supervisor_reviews", {}), name: {**review.model_dump(), **base}}
     if review.sufficient:
-        return _dispatch(state, "decide", completed, review.reason, supervisor_reviews=reviews, **reset)
+        cited = set(review.evidence_ids)
+        for v in VIEWS:
+            progress[v] = {**progress[v], "status": "sufficient",
+                           "source_ids": [i for i in _view_ids(state, v) if i in cited]}
+        return _dispatch(state, "decide", review.reason, progress, supervisor_reviews=reviews, **base)
 
-    if reset["supervisor_reworks"] >= limit:
-        return _exclude(state, completed, name, f"재조사 한도 {limit}회 소진: {review.reason}",
-                        supervisor_reviews=reviews, **reset)
+    if base["supervisor_reworks"] >= limit:
+        return _exclude(state, name, f"재조사 한도 {limit}회 소진: {review.reason}", progress,
+                        supervisor_reviews=reviews, **base)
     target = review.rework_agent
     if not queries or target is None:
-        return _exclude(state, completed, name, f"재조사 대상·질문 생성 실패: {review.reason}",
-                        supervisor_reviews=reviews, **reset)
+        return _exclude(state, name, f"재조사 대상·질문 생성 실패: {review.reason}", progress,
+                        supervisor_reviews=reviews, **base)
     # 선행 관점이 바뀌면 그 결과를 사용한 분석도 다시 수행한다.
     invalid = {target}
     for worker, deps in ANALYSIS_DEPENDENCIES.items():
         if deps & invalid:
             invalid.add(worker)
-    completed = [n for n in completed if n not in invalid]
-    reset["supervisor_reworks"] += 1
-    reset["supervisor_queries"] += queries
-    return _dispatch(state, target, completed, f"근거 부족 → 재작업: {review.reason}",
+    progress[target] = {**progress[target], "status": "insufficient", "missing": progress[target]["missing"] + queries}
+    for v in invalid - {target}:
+        progress[v] = {**progress[v], "status": "pending"}
+    base["supervisor_reworks"] += 1
+    return _dispatch(state, target, f"근거 부족 → 재작업: {review.reason}", progress,
                      **{n: {} for n in invalid}, supervisor_reviews=reviews,
-                     supervisor_task={"agent": target, "reason": review.reason, "queries": queries}, **reset)
+                     supervisor_task={"agent": target, "reason": review.reason, "queries": queries}, **base)

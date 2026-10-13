@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -107,9 +108,17 @@ def search_notice(args: argparse.Namespace, cfg) -> str:
     return msg
 
 
-def initial_state(cfg, run_date: str) -> dict:
-    return {"domain": cfg.domain.name, "run_date": run_date, "registry": {}, "discovery_rounds": 0, "iterations": 0,
-            "queue": [], "seen": [], "evaluations": [], "screened": [], "log": [], "rag_traces": []}
+def initial_state(cfg, run_date: str, run_id: str = "") -> dict:
+    return {"domain": cfg.domain.name, "run_date": run_date, "run_id": run_id, "registry": {}, "discovery_rounds": 0,
+            "iterations": 0, "queue": [], "seen": [], "evaluations": [], "screened": [], "log": [], "rag_traces": []}
+
+
+def invoke_config(run_id: str, mode: str, orchestration: str, recursion_limit: int) -> dict:
+    """LangGraph 실행 설정. run_id 를 LangSmith metadata·태그와 checkpoint thread_id 에 같이 넣어 State·외부 기록을 잇는다.
+    LangSmith 기록은 .env 의 LANGSMITH_TRACING=true·LANGSMITH_API_KEY 가 있을 때만 남는다."""
+    return {"recursion_limit": recursion_limit, "run_name": f"agtech-{orchestration}-{mode}",
+            "tags": [orchestration, mode], "metadata": {"run_id": run_id},
+            "configurable": {"thread_id": run_id}}
 
 
 def _evaluation_log(e: dict) -> dict:
@@ -121,7 +130,8 @@ def _evaluation_log(e: dict) -> dict:
 
 def build_run_log(state: dict, cfg, *, mode: str, run_date: str, elapsed: float) -> dict:
     return {
-        "run_date": run_date, "elapsed_sec": elapsed, "mode": mode, "threshold": cfg.decision.threshold,
+        "run_id": state.get("run_id"), "run_date": run_date, "elapsed_sec": elapsed, "mode": mode,
+        "threshold": cfg.decision.threshold,
         "end_reason": state.get("end_reason"),
         "models": dict(cfg.models), "embedding": cfg.embedding.model,
         "discovery_rounds": state.get("discovery_rounds"), "evaluated": state.get("iterations"),
@@ -219,16 +229,21 @@ def main(argv: list[str] | None = None) -> None:
           f"생성 {cfg.models.generator}, 판정 {cfg.models.judge}, 임베딩 {cfg.embedding.model}, 캐시 {cfg.cache.dir}/) ==")
     print(search_notice(args, cfg))
     recursion_limit = supervisor_recursion_limit() if args.supervisor else cfg.workflow.recursion_limit
-    state = app.invoke(initial_state(cfg, run_date), {"recursion_limit": recursion_limit})
+    run_id = uuid.uuid4().hex[:12]
+    orchestration = "supervisor" if args.supervisor else "sequential"
+    print(f"   run_id {run_id} (run_log·LangSmith metadata 의 연결 키)")
+    state = app.invoke(initial_state(cfg, run_date, run_id), invoke_config(run_id, mode, orchestration, recursion_limit))
     elapsed = round(time.time() - t0, 1)
 
     out_dir = cfg.report.output_dir
     run_log = build_run_log(state, cfg, mode=mode, run_date=run_date, elapsed=elapsed)
-    run_log["orchestration"] = "supervisor" if args.supervisor else "sequential"
+    run_log["orchestration"] = orchestration
     if args.supervisor:
-        run_log["supervisor"] = {"reviews": state.get("supervisor_reviews", {}),
+        run_log["supervisor"] = {"steps": state.get("supervisor_steps"), "reviews": state.get("supervisor_reviews", {}),
                                  "final_review": state.get("supervisor_final_review", {}),
                                  "excluded": state.get("supervisor_excluded", [])}
+        run_log["report_evaluation"] = {"revisions": state.get("report_revisions", 0),
+                                        **(state.get("report_evaluation") or {})}
     _write_json(f"{out_dir}/run_log.json", run_log)
     cost = TRACKER.summary()
     if cost.get("api_calls"):

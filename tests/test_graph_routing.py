@@ -139,7 +139,7 @@ def test_supervisor_edges():
     from graph.supervisor import build_supervisor_graph
 
     edges = build_supervisor_graph(Fakes([]).nodes()).get_graph().edges
-    expected = {(START, "supervisor"), ("report", END)}
+    expected = {(START, "supervisor"), ("report", "evaluate"), ("evaluate", "report"), ("evaluate", END)}
     expected |= {("supervisor", name) for name in NODE_NAMES}
     expected |= {(name, "supervisor") for name in NODE_NAMES if name != "report"}
     assert {(e.source, e.target) for e in edges} == expected
@@ -239,16 +239,27 @@ def test_supervisor_handles_repeated_rework_queries(supervisor_llm, new_queries,
 def test_supervisor_worker_input_is_isolated():
     from graph.supervisor import worker_node
 
-    inbox = {"current": {"official_name": "A"}, "registry": {"Wabc12": {"snippet": "원문"}}}
+    state = {"current": {"official_name": "A"}, "registry": {"Wabc12": {"snippet": "원문"}}, "market": {"hidden": True},
+             "view_progress": {}, "supervisor_steps": 3}
 
-    def node(state):
-        assert "market" not in state
-        state["current"]["official_name"] = "변경"
-        state["registry"]["Wabc12"]["snippet"] = "변경"
+    def node(inbox):
+        assert "market" not in inbox and "view_progress" not in inbox  # 다른 관점 결과·제어 상태는 받지 않는다
+        inbox["current"]["official_name"] = "변경"
+        inbox["registry"]["Wabc12"]["snippet"] = "변경"
         return {"founder": {"name": "A"}}
 
-    worker_node("founder", node)({"supervisor_inbox": inbox, "market": {"hidden": True}}, {})
-    assert inbox["current"]["official_name"] == "A" and inbox["registry"]["Wabc12"]["snippet"] == "원문"
+    worker_node("founder", node)(state, {})
+    assert state["current"]["official_name"] == "A" and state["registry"]["Wabc12"]["snippet"] == "원문"
+
+
+def test_supervisor_worker_failure_is_reported_not_raised():
+    from graph.supervisor import worker_node
+
+    def boom(inbox):
+        raise RuntimeError("API 한도 초과")
+
+    out = worker_node("tech", boom)({"current": {"official_name": "A"}}, {})
+    assert out["last_error"] == "RuntimeError: API 한도 초과"
 
 
 def test_supervisor_can_choose_different_order(supervisor_llm):
@@ -625,3 +636,47 @@ def test_supervisor_excludes_candidate_when_agent_returns_nothing(supervisor_llm
     out = build_supervisor_graph(nodes).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
     assert [x["candidate"] for x in out["supervisor_excluded"]] == ["A"]
     assert [e["name"] for e in out["evaluations"]] == ["B"] and f.calls.count("report") == 1
+
+
+def test_supervisor_quality_loop_rewrites_report(supervisor_llm, monkeypatch, set_cfg):
+    from agents import evaluator
+    from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
+
+    set_cfg("evaluation.max_revisions", 2)
+    verdicts = iter([False, True])  # 첫 보고서 미달 → 재작성 → 통과
+
+    def fake_evaluate(state):
+        ok = next(verdicts)
+        n = state.get("report_revisions", 0)
+        return {"report_evaluation": {"passed": ok, "retry": not ok, "feedback": "" if ok else "인용 보강"},
+                "report_revisions": n + (not ok)}
+
+    f = Fakes([["A"]])
+    nodes = {**supervisor_nodes(f), "evaluate": fake_evaluate}
+    out = build_supervisor_graph(nodes).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
+    assert f.calls.count("report") == 2 and out["report_revisions"] == 1 and out["report_evaluation"]["passed"]
+
+
+def test_supervisor_step_limit_finishes_with_report(supervisor_llm, set_cfg):
+    from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
+
+    set_cfg("supervisor.max_steps", 4)
+    f = Fakes([["A", "B"]])
+    out = build_supervisor_graph(supervisor_nodes(f)).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
+    assert out["end_reason"] == "step_limit" and out["supervisor_steps"] == 5
+    assert f.calls.count("report") == 1 and "decide" not in f.calls
+
+
+def test_supervisor_view_progress_tracks_status_and_attempts(supervisor_llm):
+    from agents.supervisor import EvidenceReview
+    from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
+
+    supervisor_llm.reviews.append(EvidenceReview(sufficient=False, reason="기술 근거 부족", evidence_ids=[],
+                                                 rework_agent="tech", queries=["A 실증 결과"]))
+    f = Fakes([["A"]])
+    out = build_supervisor_graph(supervisor_nodes(f)).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
+    vp = out["view_progress"]
+    assert all(v["status"] == "sufficient" for v in vp.values())
+    assert vp["tech"]["attempts"] == 2 and vp["tech"]["missing"] == ["A 실증 결과"]
+    assert vp["market"]["attempts"] == vp["competition"]["attempts"] == 2 and vp["founder"]["attempts"] == 1
+    assert vp["tech"]["source_ids"] == ["Wabc12"]
