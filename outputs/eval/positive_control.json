@@ -1,0 +1,158 @@
+[
+  {
+    "name": "Source.ag",
+    "eligible": true,
+    "stage": "Series B",
+    "decision": "보류",
+    "multiplier": 0.9612,
+    "threshold": 1.0,
+    "hold_type": "창업자 점수 평균 미만",
+    "founder_yes": 0,
+    "unknown_ratio": 0.87,
+    "reasons": [
+      "창업자 기준 91.2(동종 평균 100) — 팀이 동종 평균 미만",
+      "동종 평균 대비 96.1(동종 평균 100) — 동종 평균 이하 (미확인 문항 87%)"
+    ],
+    "flip": "F1·F2 이(가) YES 로 확인되면 동종 평균 대비 103.6(동종 평균 100) → 투자",
+    "reference_n": 10,
+    "rejected_yes": [
+      {
+        "qid": "M4",
+        "reason": "인용문이 근거 본문에서 확인되지 않음"
+      },
+      {
+        "qid": "C3",
+        "reason": "인용 주변(±300자)에 회사명이 없음 (업계 일반론이 아니라 이 회사 이야기여야 함)"
+      },
+      {
+        "qid": "R2",
+        "reason": "인용문이 근거 본문에서 확인되지 않음"
+      }
+    ],
+    "unknown_qids": [
+      "F1",
+      "F2",
+      "F3",
+      "F4",
+      "M3",
+      "M4",
+      "P1",
+      "P2",
+      "P3",
+      "C1",
+      "C2",
+      "C3",
+      "C4",
+      "R1",
+      "R2",
+      "R3",
+      "R4",
+      "D2",
+      "D3",
+      "D4"
+    ],
+    "criteria": {
+      "founder": 91.2,
+      "market": 107.5,
+      "product": 90.0,
+      "competition": 92.5,
+      "traction": 96.2,
+      "deal": 95.0
+    },
+    "sensitivity": {
+      "1.00": "보류",
+      "1.05": "보류",
+      "1.10": "보류",
+      "1.15": "보류",
+      "1.20": "보류"
+    },
+    "failed_searches": 0
+  },
+  {
+    "name": "Agtonomy",
+    "eligible": false,
+    "stage": "Series B",
+    "decision": "적격성 탈락",
+    "multiplier": null,
+    "unknown_ratio": null,
+    "reasons": [
+      "G5 상장사·대기업 계열 (독립 스타트업 아님)"
+    ],
+    "failed_searches": 0
+  },
+  {
+    "name": "아이오크롭스",
+    "eligible": true,
+    "stage": "Pre-A",
+    "decision": "투자",
+    "multiplier": 1.0462,
+    "threshold": 1.0,
+    "hold_type": null,
+    "founder_yes": 2,
+    "unknown_ratio": 0.708,
+    "reasons": [
+      "동종 평균 대비 104.6(동종 평균 100) — 동종 평균보다 높음",
+      "창업자 기준 116.3(동종 평균 100) — 평균 이상",
+      "Deal-killer 없음"
+    ],
+    "flip": null,
+    "reference_n": 10,
+    "rejected_yes": [
+      {
+        "qid": "P1",
+        "reason": "실증·예정 단계 (인용 주변에 예정·목표·실증·PoC·시범 표현)"
+      },
+      {
+        "qid": "P2",
+        "reason": "회사 자체 발표만 있음 (제3자 근거 필요)"
+      },
+      {
+        "qid": "R1",
+        "reason": "인용 주변(±300자)에 회사명이 없음 (업계 일반론이 아니라 이 회사 이야기여야 함)"
+      },
+      {
+        "qid": "R2",
+        "reason": "최근 24개월 이내 근거 아님"
+      },
+      {
+        "qid": "R3",
+        "reason": "인용 주변(±300자)에 회사명이 없음 (업계 일반론이 아니라 이 회사 이야기여야 함)"
+      }
+    ],
+    "unknown_qids": [
+      "F3",
+      "F4",
+      "M3",
+      "M4",
+      "P1",
+      "P2",
+      "P3",
+      "C1",
+      "C2",
+      "C3",
+      "C4",
+      "R1",
+      "R2",
+      "R3",
+      "D2",
+      "D3",
+      "D4"
+    ],
+    "criteria": {
+      "founder": 116.3,
+      "market": 107.5,
+      "product": 105.0,
+      "competition": 92.5,
+      "traction": 108.7,
+      "deal": 70.0
+    },
+    "sensitivity": {
+      "1.00": "투자",
+      "1.05": "보류",
+      "1.10": "보류",
+      "1.15": "보류",
+      "1.20": "보류"
+    },
+    "failed_searches": 0
+  }
+]
