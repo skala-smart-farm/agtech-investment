@@ -12,7 +12,8 @@
   미확인을 부정 사실로 바꾸거나 확인 없이 투자 전제를 채우면 안 된다.
 
 충분하면 sufficient=true, rework_agent=null, queries=[]로 답하고 사용한 실재 근거 ID를 evidence_ids에 적는다.
-부족하면 sufficient=false로 답한다. 담당 관점 하나를 rework_agent로 지정하고 부족한 주장을 확인할
+rework_candidates 는 미확인 문항이 확인되면 결론(투자·보류)이 바뀌는 관점과 그 이유다. 이 관점들의 공백만 결론에 영향을 준다.
+부족하면 sufficient=false로 답한다. rework_candidates 중 담당 관점 하나를 rework_agent로 지정하고 부족한 주장을 확인할
 새로운 구체적인 웹 검색 질문 1~3개를 queries에 적는다. 기업명·제품명·검증할 사실을 포함한다.
 previous_queries에 있는 검색을 반복하지 않는다. reason에 부족한 증거와 재조사의 목적을 구체적으로 적는다.
 재조사 횟수는 비용 상한 정보이며 충분성 판단의 근거가 아니다. 상한이 소진돼도 부족하면 false를 유지한다.

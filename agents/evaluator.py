@@ -20,7 +20,8 @@ from tools.grounding import norm
 ITEMS = ("groundedness", "neutrality", "bias_control")
 LABELS = {"groundedness": "Groundedness", "neutrality": "중립성", "bias_control": "편향 통제"}
 NUM_CITE = re.compile(r"\[\d+(?:, \d+)*\]")
-NO_CITE_SECTIONS = ("SUMMARY", "REFERENCE", "한계점")  # 인용 번호를 요구하지 않는 장
+# 인용 번호를 요구하지 않는 장. "후보 풀과 선정 과정"은 코드가 만든 발굴·관문 집계 표라 출처 인용이 없다
+NO_CITE_SECTIONS = ("SUMMARY", "REFERENCE", "한계점", "후보 풀과 선정 과정")
 
 
 class Judgment(BaseModel):

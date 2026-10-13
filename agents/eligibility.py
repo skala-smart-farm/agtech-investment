@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import copy
 import re
-from concurrent.futures import ThreadPoolExecutor
+from langsmith.utils import ContextThreadPoolExecutor
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -232,7 +232,7 @@ def eligibility_node(state: dict) -> dict:
     registry = copy.deepcopy(snapshot)
     records = []
     # 후보별 검색은 병렬 (같은 시작 스냅샷의 복사본으로)
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ContextThreadPoolExecutor(max_workers=4) as ex:
         for rec, reg_data in ex.map(lambda c: _check_one(c, copy.deepcopy(snapshot)), cands):
             records.append(rec)
             for k, v in reg_data.items():

@@ -55,6 +55,11 @@ def supervisor_llm(monkeypatch):
 
     import tools.web_search
     monkeypatch.setattr(tools.web_search, "web_search", search)
+    # 결론 기반 판단은 기본으로 '미확인이 남은 관점은 모두 결론을 바꿀 수 있음'으로 둔다 (LLM 검토 경로를 시험)
+    monkeypatch.setattr(supervisor, "_reference_mean", lambda name: {})
+    monkeypatch.setattr(supervisor, "swing_views", lambda state, name: ("보류", {
+        v: "테스트" for v in supervisor.VIEWS
+        if any(r.get("answer") == "UNKNOWN" for r in ((state.get(v) or {}).get("criterion") or {}).get("rows", []))}))
     return fake
 
 
@@ -69,8 +74,10 @@ def supervisor_nodes(fakes, inputs=None):
                 inputs.append((name, state))
             out = node(state)
             ids = ["Wabc12", *state.get("supervisor_research_ids", [])]
+            found = bool(state.get("supervisor_research_ids"))  # 재조사로 근거가 생기면 미확인 문항이 YES 가 된다
             out[name].update(evidence_ids=ids, pool_ids=ids, criterion={"rows": [
-                {"qid": name, "answer": "YES", "quote": "검증된 사실", "evidence_ids": ["Wabc12"]}]})
+                {"qid": name, "answer": "YES", "quote": "검증된 사실", "evidence_ids": ["Wabc12"]},
+                {"qid": name + "2", "answer": "YES" if found else "UNKNOWN", "quote": "", "evidence_ids": []}]})
             out["registry"] = {**state.get("registry", {}), "Wabc12": {
                 "kind": "web", "snippet": "검증된 사실", "title": "검증 근거", "url": "https://example.org/evidence"}}
             return out
@@ -215,12 +222,13 @@ def test_supervisor_does_not_approve_with_fabricated_evidence(supervisor_llm):
     assert f.calls.count("decide") == f.calls.count("report") == 1
 
 
-@pytest.mark.parametrize("new_queries, expected_searches, sufficient", [
-    (["A 고객 확인", "A 매출 확인"], ["A 고객 확인", "A 매출 확인"], True),
-    (["A 고객 확인"], ["A 고객 확인", "A 매출 확인"], True),
-    (["A 고객 확인"], ["A 고객 확인"], False),
+@pytest.mark.parametrize("new_queries, expected_searches, hold_reason", [
+    (["A 고객 확인", "A 매출 확인"], ["A 고객 확인", "A 매출 확인"], None),
+    (["A 고객 확인"], ["A 고객 확인", "A 매출 확인"], None),
+    (["A 고객 확인"], ["A 고객 확인"], "재조사 대상·질문 생성 실패"),
 ])
-def test_supervisor_handles_repeated_rework_queries(supervisor_llm, new_queries, expected_searches, sufficient):
+def test_supervisor_handles_repeated_rework_queries(supervisor_llm, new_queries, expected_searches, hold_reason):
+    """이미 해결된 관점(market)을 다시 지목하면 결론을 바꿀 수 있는 다른 관점으로 돌린다. 새 질문이 없으면 근거 부족 보류."""
     from agents.supervisor import EvidenceReview
     from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
 
@@ -230,12 +238,17 @@ def test_supervisor_handles_repeated_rework_queries(supervisor_llm, new_queries,
 
     supervisor_llm.reviews.extend([shortage(["A 고객 확인"]), shortage(new_queries)])
     if new_queries == ["A 고객 확인"]:
-        supervisor_llm.reviews.append(shortage(["A 매출 확인"] if sufficient else ["A 고객 확인"]))
+        supervisor_llm.reviews.append(shortage(["A 고객 확인"] if "생성 실패" in (hold_reason or "") else ["A 매출 확인"]))
     f = Fakes([["A"]])
     out = build_supervisor_graph(supervisor_nodes(f)).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
     assert [query for _, query in supervisor_llm.searches] == expected_searches
     assert f.calls.count("decide") == 1 and f.calls.count("report") == 1 and not out.get("supervisor_excluded")
-    assert out["supervisor_reviews"]["A"]["sufficient"] is sufficient
+    if hold_reason:
+        assert any(f"근거 부족 보류로 채점: {hold_reason}" in line for line in out["log"])
+    else:
+        agents = [agent for agent, _ in supervisor_llm.searches]
+        assert agents[0] == "market" and agents[1] != "market"  # 두 번째 재조사는 미확인이 남은 관점으로
+        assert out["supervisor_reviews"]["A"]["sufficient"]
     assert any(p.get("feedback") for p in supervisor_llm.prompts) == (new_queries == ["A 고객 확인"])
 
 
@@ -684,3 +697,78 @@ def test_supervisor_view_progress_tracks_status_and_attempts(supervisor_llm):
     assert vp["tech"]["attempts"] == 2 and vp["tech"]["missing"] == ["A 실증 결과"]
     assert vp["market"]["attempts"] == vp["competition"]["attempts"] == 2 and vp["founder"]["attempts"] == 1
     assert vp["tech"]["source_ids"] == ["Wabc12"]
+
+
+
+def _view_rows(dim: str, answers: list[str]) -> dict:
+    from core.judge import SIGNAL
+    return {"criterion": {"rows": [{"dim": dim, "qid": f"{dim}{i}", "answer": a, "x": SIGNAL[a]} for i, a in enumerate(answers)]}}
+
+
+def test_swing_views_finds_views_that_can_change_conclusion(monkeypatch):
+    """잠정 결론(투자 판단과 같은 점수 규칙)을 바꿀 수 있는 관점만 재조사 대상이 된다."""
+    from agents import supervisor
+
+    monkeypatch.setattr(supervisor, "_reference_mean", lambda name: {})
+    state = {"founder": _view_rows("founder", ["YES", "UNKNOWN", "UNKNOWN", "UNKNOWN"]),
+             "tech": _view_rows("product", ["UNKNOWN"] * 4), "market": _view_rows("market", ["YES"] * 4),
+             "competition": _view_rows("competition", ["NO", "UNKNOWN", "UNKNOWN", "UNKNOWN"])}
+    now, swing = supervisor.swing_views(state, "A")
+    assert now == "투자" and "market" not in swing  # 미확인이 없는 관점은 대상이 아니다
+    assert set(swing) == {"founder"} and "NO" in swing["founder"]  # 창업자 미확인이 NO 면 창업자 기준 미달 → 보류
+
+
+def test_supervisor_skips_review_when_conclusion_cannot_change(supervisor_llm, monkeypatch):
+    """어떤 미확인이 확인돼도 결론이 그대로면 재조사·LLM 검토 없이 바로 판단한다."""
+    from agents import supervisor
+    from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
+
+    monkeypatch.setattr(supervisor, "swing_views", lambda state, name: ("보류", {}))
+    f = Fakes([["A"]])
+    out = build_supervisor_graph(supervisor_nodes(f)).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
+    assert not [p for p in supervisor_llm.prompts if "available_workers" not in p]  # 충분성 LLM 검토를 부르지 않음
+    assert f.calls.count("decide") == 1 and out["supervisor_reviews"]["A"]["reason"].startswith("잠정 결론 보류")
+
+
+def test_supervisor_stops_reworking_view_without_improvement(supervisor_llm, monkeypatch):
+    """재조사해도 미확인이 줄지 않은 관점은 더 재조사하지 않고, 결론을 바꿀 다른 관점이 없으면 근거 부족 보류."""
+    from agents import supervisor
+    from agents.supervisor import EvidenceReview
+    from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
+
+    monkeypatch.setattr(supervisor, "swing_views", lambda state, name: ("보류", {"tech": "테스트"}))
+    supervisor_llm.reviews.append(EvidenceReview(sufficient=False, reason="기술 근거 부족", evidence_ids=[],
+                                                 rework_agent="tech", queries=["A 실증"]))
+    f = Fakes([["A"]])
+    nodes = supervisor_nodes(f)
+    real_tech = nodes["tech"]
+    nodes["tech"] = lambda s: real_tech({**s, "supervisor_research_ids": []})  # 재조사해도 근거를 못 찾음
+    out = build_supervisor_graph(nodes).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
+    assert out["view_progress"]["tech"]["exhausted"] and f.calls.count("tech") == 2
+    assert any("근거 부족 보류로 채점: 재조사 후 개선 없음" in line for line in out["log"])
+
+
+@pytest.mark.parametrize("founder_answers, skipped", [
+    (["YES", "YES", "YES", "NO"], {"market", "competition"}),  # F4 NO → Deal-killer K3
+    (["NO", "NO", "NO", "UNKNOWN"], {"market", "competition"}),  # 미확인이 YES 여도 창업자 기준 미달
+])
+def test_supervisor_skips_remaining_views_when_hold_is_settled(supervisor_llm, monkeypatch, founder_answers, skipped):
+    """결론(보류)이 이미 정해지면 남은 관점을 건너뛰고 바로 판단한다 → 후보마다 경로 길이가 달라진다."""
+    from agents import supervisor
+    from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
+
+    supervisor_llm.order = ["tech", "founder", "market", "competition"]
+    f = Fakes([["A"]])
+    nodes = supervisor_nodes(f)
+    real_founder = nodes["founder"]
+
+    def founder(s):
+        out = real_founder(s)
+        out["founder"]["criterion"] = {"rows": [{"dim": "founder", "qid": f"F{i + 1}", "answer": a} for i, a in enumerate(founder_answers)]}
+        return out
+
+    nodes["founder"] = founder
+    out = build_supervisor_graph(nodes).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
+    assert not ({"market", "competition"} & set(f.calls)) and f.calls.count("decide") == 1
+    assert {v for v, p in out["view_progress"].items() if p["status"] == "skipped"} == skipped
+    assert out["supervisor_reviews"]["A"]["early_stop"]

@@ -11,7 +11,9 @@ from typing import Literal
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from agents import decision as D
 from core.config import get_config
+from core.judge import SIGNAL, load_rubric
 from core.llm_bounded import bounded
 from core.prompts import render
 from graph.routes import route_after_decide
@@ -56,7 +58,61 @@ def _ask(schema, template: str, context: dict):
 
 
 def _fresh_progress() -> dict:
-    return {v: {"status": "pending", "attempts": 0, "missing": [], "source_ids": []} for v in VIEWS}
+    return {v: {"status": "pending", "attempts": 0, "missing": [], "source_ids": [], "exhausted": False} for v in VIEWS}
+
+
+# ── 결론 기반 판단: 투자 판단과 같은 점수 규칙으로 '지금 근거로 본 잠정 결론'과 그것을 바꿀 수 있는 관점을 계산한다
+def _view_dims(rubric: dict) -> dict[str, str]:
+    """관점(에이전트) → 그 에이전트가 판정하는 Scorecard 기준 id (founder→founder, tech→product …)."""
+    return {d["owner"]: d["id"] for d in rubric["dimensions"] if d["owner"] in VIEWS}
+
+
+def _reference_mean(name: str) -> dict:
+    return D.load_reference(exclude=name)["mean"]
+
+
+def _rows(state: dict) -> list[dict]:
+    return [r for v in VIEWS for r in ((state.get(v) or {}).get("criterion") or {}).get("rows", [])]
+
+
+def _provisional(rows: list[dict], mean: dict, rubric: dict) -> str:
+    """판정된 문항만으로 본 잠정 결론 (실적·투자조건은 아직 판정 전이라 동종 평균 1.00 으로 둔다)."""
+    dc = get_config().decision
+    M, criteria = D.payne_multiplier(rows, mean, rubric, dc.step, dc.clip)
+    return D._decide(M, D._founder_c(criteria), D._killers(rows, rubric), dc.threshold, dc.founder_min_c)
+
+
+def swing_views(state: dict, name: str) -> tuple[str, dict[str, str]]:
+    """잠정 결론과, 미확인 문항이 모두 YES(또는 모두 NO)로 확인되면 결론이 바뀌는 관점 {관점: 설명}.
+    여기에 없는 관점은 아무리 재조사해도 결론이 바뀌지 않는다."""
+    rubric, mean = load_rubric(), _reference_mean(name)
+    dims, rows = _view_dims(rubric), _rows(state)
+    now = _provisional(rows, mean, rubric)
+    swing = {}
+    for v in VIEWS:
+        unk = [i for i, r in enumerate(rows) if r.get("dim") == dims[v] and r.get("answer") == "UNKNOWN"]
+        for ans in ("YES", "NO"):
+            alt = [{**r, "answer": ans, "x": SIGNAL[ans]} if i in unk else r for i, r in enumerate(rows)]
+            if unk and (to := _provisional(alt, mean, rubric)) != now:
+                swing[v] = f"미확인 {len(unk)}문항이 {ans}면 {now} → {to}"
+                break
+    return now, swing
+
+
+def _settled(state: dict, name: str, progress: dict) -> str | None:
+    """남은 관점과 관계없이 보류가 확정됐으면 그 이유 (Deal-killer 확인, 창업자 기준 미달 확정)."""
+    rubric = load_rubric()
+    rows = _rows(state)
+    if killers := D._killers(rows, rubric):
+        return f"Deal-killer {', '.join(killers)} 확인"
+    if progress["founder"]["status"] in DONE:
+        dc = get_config().decision
+        best = [{**r, "answer": "YES", "x": 1} if r.get("answer") == "UNKNOWN" else r
+                for r in rows if r.get("dim") == "founder"]  # 미확인이 모두 YES 여도
+        _, criteria = D.payne_multiplier(best, _reference_mean(name), rubric, dc.step, dc.clip)
+        if (fc := D._founder_c(criteria)) < dc.founder_min_c:
+            return f"창업자 기준 {fc * 100:.1f} < {dc.founder_min_c * 100:.0f} (미확인이 모두 YES 여도 미달)"
+    return None
 
 
 def _view_ids(state: dict, view: str) -> list[str]:
@@ -140,6 +196,11 @@ def _exclude(state: dict, name: str, reason: str, progress: dict, **updates) -> 
     return _dispatch(state, "discover", f"실행 실패로 제외 → 다음 후보: {reason}", **updates)
 
 
+def _unknown_count(state: dict) -> int:
+    """네 관점 판정에서 미확인으로 남은 문항 수. 재조사가 나아졌는지 이 값으로 본다."""
+    return sum(r.get("answer") == "UNKNOWN" for v in VIEWS for r in ((state.get(v) or {}).get("criterion") or {}).get("rows", []))
+
+
 def _hold_for_shortfall(state: dict, reason: str, progress: dict, **updates) -> dict:
     """재조사로도 근거가 부족한 후보는 빼지 않고 투자 판단으로 보내 '근거 부족' 보류로 채점한다.
     확인되지 않은 문항은 미확인(신호 0)으로 계산되고, 후보는 비교표·동종 기준 집단에 그대로 들어간다."""
@@ -174,6 +235,16 @@ def supervisor_node(state: dict) -> dict:
 
     done = {v for v in VIEWS if progress[v]["status"] in DONE}
     ready = [n for n, deps in ANALYSIS_DEPENDENCIES.items() if n not in done and deps <= done]
+    if ready and (why := _settled(state, name, progress)):
+        # 결론이 이미 정해졌으면 남은 관점을 건너뛰고 바로 판단 (후보마다 경로 길이가 달라진다)
+        skipped = [v for v in VIEWS if v not in done]
+        for v in skipped:
+            progress[v] = {**progress[v], "status": "skipped"}
+        reviews = {**state.get("supervisor_reviews", {}),
+                   name: {"sufficient": True, "early_stop": True, "skipped": skipped, "unknown": _unknown_count(state),
+                          "reason": f"{why} → 보류 확정, {'·'.join(skipped)} 생략", **base}}
+        return _dispatch(state, "decide", f"{why} → 보류 확정, 남은 관점 {'·'.join(skipped)} 생략", progress,
+                         supervisor_reviews=reviews, **base)
     context = _context(state, progress)
     if ready:
         if len(ready) == 1:
@@ -187,6 +258,30 @@ def supervisor_node(state: dict) -> dict:
 
     # 네 관점의 수집 완료만으로 보고서를 허용하지 않는다. 근거를 검토한 뒤 분기한다.
     limit = cfg.max_reworks_per_candidate
+    unknown = _unknown_count(state)
+    last = (state.get("supervisor_reviews") or {}).get(name, {})
+    before = last.get("unknown")
+    if base["supervisor_reworks"] and before is not None and unknown >= before and last.get("rework_agent") in VIEWS:
+        # 개선이 확인될 때만 재시도: 미확인이 줄지 않은 관점은 더 재조사하지 않는다
+        progress[last["rework_agent"]] = {**progress[last["rework_agent"]], "exhausted": True}
+    now, swing = swing_views(state, name)
+    candidates = {v: why for v, why in swing.items() if not progress[v].get("exhausted")}
+    if not swing:
+        # 어떤 미확인 문항이 확인돼도 결론이 바뀌지 않는다 → 지금 근거로 판단할 수 있다 (재조사·LLM 검토 생략)
+        for v in VIEWS:
+            progress[v] = {**progress[v], "status": "sufficient"}
+        reason = f"잠정 결론 {now} — 미확인 {unknown}문항이 모두 확인돼도 결론이 바뀌지 않음"
+        reviews = {**state.get("supervisor_reviews", {}),
+                   name: {"sufficient": True, "reason": reason, "unknown": unknown, "swing": {}, **base}}
+        return _dispatch(state, "decide", reason, progress, supervisor_reviews=reviews, **base)
+    if not candidates:
+        # 결론을 바꿀 수 있는 관점은 있지만 재조사해도 미확인이 줄지 않았다
+        reviews = {**state.get("supervisor_reviews", {}),
+                   name: {**last, "unknown": unknown, "swing": swing, **base}}
+        return _hold_for_shortfall(state, f"재조사 후 개선 없음: 미확인 {before} → {unknown}문항, "
+                                          f"결론을 바꿀 수 있는 관점({'·'.join(swing)})의 근거를 더 찾지 못함",
+                                   progress, supervisor_reviews=reviews, **base)
+    context = {**context, "rework_candidates": candidates}
     previous_queries = set(context["previous_queries"])
     review = _normalize(_ask(EvidenceReview, "supervisor_review", context), context["sources"])
     queries = _new_queries(review, previous_queries)
@@ -196,7 +291,14 @@ def supervisor_node(state: dict) -> dict:
                                     "previous_queries 를 제외한 새로운 검색 질문을 제안하라."),
         }), context["sources"])
         queries = _new_queries(review, previous_queries)
-    reviews = {**state.get("supervisor_reviews", {}), name: {**review.model_dump(), **base}}
+    if not review.sufficient and review.rework_agent not in candidates:
+        # 재조사는 결론을 바꿀 수 있는 관점으로만: 그중 미확인이 가장 많은 관점
+        dims = _view_dims(load_rubric())
+        target = max(candidates, key=lambda v: sum(r.get("answer") == "UNKNOWN" and r.get("dim") == dims[v]
+                                                   for r in _rows(state)))
+        review = review.model_copy(update={"rework_agent": target})
+    reviews = {**state.get("supervisor_reviews", {}),
+               name: {**review.model_dump(), "unknown": unknown, "swing": swing, **base}}
     if review.sufficient:
         cited = set(review.evidence_ids)
         for v in VIEWS:

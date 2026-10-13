@@ -32,6 +32,7 @@ ViewStatus = Literal[
     "insufficient",  # Supervisor 가 근거 부족으로 재조사 요청
     "sufficient",    # Supervisor 가 근거 충분으로 승인
     "failed",        # 에이전트 실행 실패
+    "skipped",       # 결론이 이미 정해져 조사를 건너뜀 (Deal-killer·창업자 기준 미달 확정)
 ]
 
 
@@ -40,6 +41,7 @@ class ViewProgress(TypedDict):
     attempts: int              # 이 후보에서 해당 관점을 실행한 횟수
     missing: list[str]         # 재조사 때 보완할 항목 (Supervisor 가 만든 검색 질문)
     source_ids: list[str]      # Supervisor 가 승인할 때 쓴 근거 id
+    exhausted: bool            # 재조사해도 미확인이 줄지 않아 더 재조사하지 않는 관점
 
 
 class ReportEvaluation(TypedDict):

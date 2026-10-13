@@ -165,5 +165,7 @@ def market_node(state: dict) -> dict:
            f"근거 {len(out['evidence_ids'])}건 (문서 {sum(i.startswith('D') for i in out['evidence_ids'])}건) "
            f"→ 시장성 YES {crit['yes']}/{crit['n']}")
     print(msg)
-    return {"registry": reg.data, "market": {**out, "criterion": crit}, "market_cache": {seg["id"]: out},
-            "log": [msg], "rag_traces": traces}
+    result = {"registry": reg.data, "market": {**out, "criterion": crit}, "log": [msg], "rag_traces": traces}
+    if not state.get("supervisor_research_ids"):  # 이 후보의 재조사 근거가 섞인 분석은 같은 분야 다른 후보가 재사용하지 않게
+        result["market_cache"] = {seg["id"]: out}
+    return result

@@ -526,3 +526,11 @@ def test_tech_baseline_with_real_answer_question_v1(monkeypatch, judge_calls, no
     docs = [i for i in out["tech"]["pool_ids"] if i.startswith("D")]
     assert docs and all(i in out["registry"] for i in docs)
     assert out["rag_traces"][0]["trace"] and out["rag_traces"][0]["status"] == "grounded"
+
+
+def test_market_rework_does_not_update_segment_cache(monkeypatch, judge_calls):
+    """재조사 근거(supervisor_research_ids)가 섞인 시장 분석은 분야 캐시에 남기지 않는다 (같은 분야 다른 후보에 섞이지 않게)."""
+    subs = [("국내 스마트팜 시장 규모", "시장 규모"), ("글로벌 성장률", "성장률"), ("농가 수요", "수요")]
+    _market_patch(monkeypatch, subs)
+    out = mk.market_node({**state_for(kr_company()), "supervisor_research_ids": ["Wold01"]})
+    assert "market_cache" not in out and "Wold01" in out["market"]["pool_ids"]
