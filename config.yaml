@@ -104,8 +104,9 @@ roi:                                   # ROI 참고치 (점수에는 쓰지 않�
   stage_median_source: "AgFunder(2026) p.13, 2025 agrifoodtech median deal size by stage"
 
 report:
-  max_pages: 5
+  max_pages: 10                        # 보고서 최대 쪽수
   summary_max_chars: 560               # SUMMARY 글자 수 상한
+  summary_max_ratio: 0.5               # SUMMARY 높이 상한 (A4 대비)
   output_dir: outputs
   scenario: false                      # --out 실행: 제출용 파일을 만들지 않음
   max_rewrites: 2                      # 보고서 재작성 상한

@@ -23,7 +23,7 @@ from core.config import ROOT, get_config, get_segment, path
 from core.judge import company_keys
 from core.llm_bounded import bounded
 from core.prompts import render
-from report.render import html_to_pdf, render_html
+from report.render import MAX_DENSITY, html_to_pdf, render_html
 from tools import web_search as search_tool
 from tools.grounding import norm
 from tools.sources import (ACCESS_DATE_NOTE, GROUPS, REFERENCE_FORMATS, SourceRegistry, citable, format_reference,
@@ -1196,7 +1196,7 @@ def _finish(view: dict, md: str, result: dict, cfg, checks: dict, mode: str, cit
         shutil.copyfile(pdf_path, submit)
         submit_pdf = str(submit)
     checks = {"pages": result["pages"], "max_pages": cfg.report.max_pages, "pages_ok": result["pages"] <= cfg.report.max_pages,
-              "summary_ratio": result["summary_ratio"], "summary_ok": result["summary_ratio"] <= 0.5, **checks}
+              "summary_ratio": result["summary_ratio"], "summary_ok": result["summary_ratio"] <= cfg.report.summary_max_ratio, **checks}
     bad = [k for k, v in checks.items() if (k.endswith("_ok") or k in ("refs_match_citations", "conclusion_matches_scorecard",
                                                                         "assumptions_labeled")) and v is False]
     msg = (f"[보고서] {mode} {pdf_path.name} {result['pages']}쪽 (≤{cfg.report.max_pages}), SUMMARY A4 대비 "
@@ -1270,6 +1270,7 @@ def report_node(state: dict) -> dict:
     c2_yes = verdict.get("C2") == "YES"
     comp_names = ", ".join(r[0] for r in _competitor_rows(target, reg, [], c2_yes))
     ctx = _context(mode, target, ranked, reg, pool, conclusion, comp_names, run_date, failed_by)
+    ctx["max_pages"] = cfg.report.max_pages
     schema = Draft if mode == "invest" else HoldDraft
 
     def summary(d: _Body) -> list[tuple[str, str]]:
@@ -1301,7 +1302,7 @@ def report_node(state: dict) -> dict:
             f"{cfg.domain.name} · {prof.get('official_name') or target['name']} ({prof.get('stage') or '-'}"
             f"{', ' + prof['round_date'] if prof.get('round_date') else ''}) · {seg} · 작성일 {run_date}")
 
-    # 2) 렌더링 → 분량 검증. 5쪽을 넘으면 조판 밀도를 올리고, 그래도 넘으면 줄여 쓴다
+    # 2) 렌더링 → 분량 검증. 쪽수 상한을 넘으면 조판 밀도를 올리고, 그래도 넘으면 줄여 쓴다
     result, density, shorten_round = {}, 0, 0
     while True:
         d = draft.model_dump()
@@ -1321,9 +1322,9 @@ def report_node(state: dict) -> dict:
         numbered["ref_groups"] = _ref_groups(refs)
         html = render_html(numbered, density=density)
         result = html_to_pdf(html, pdf_path)
-        if result["pages"] <= cfg.report.max_pages and result["summary_ratio"] <= 0.5:
+        if result["pages"] <= cfg.report.max_pages and result["summary_ratio"] <= cfg.report.summary_max_ratio:
             break
-        if density < 3:
+        if density < MAX_DENSITY:
             density += 1
             continue
         if shorten_round >= max_rw:
