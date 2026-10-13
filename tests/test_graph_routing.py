@@ -24,6 +24,239 @@ DESIGN_EDGES = {(START, "discover"), ("discover", "founder"), ("discover", "repo
 ANALYSIS = ("founder", "tech", "market", "competition")
 
 
+@pytest.fixture
+def supervisor_llm(monkeypatch):
+    """LLM이 tech → market → founder → competition 순서를 고르게 한다. 네트워크 호출 없음."""
+    from types import SimpleNamespace
+    from agents import supervisor
+
+    fake = SimpleNamespace(prompts=[], reviews=[], searches=[], order=["tech", "market", "competition", "founder"])
+
+    def invoke(schema, messages):
+        context = json.loads(messages[-1].content)
+        fake.prompts.append(context)
+        if schema is supervisor.EvidenceReview:
+            if fake.reviews:
+                return fake.reviews.pop(0)
+            return schema(sufficient=True, reason="각 관점의 검증 가능한 근거가 있음", evidence_ids=["Wabc12"],
+                          rework_agent=None, queries=[])
+        ready = context["available_workers"]
+        selected = next(name for name in fake.order if name in ready)
+        return supervisor.SupervisorChoice(next_agent=selected, reason="제품과 시장부터 확인")
+
+    monkeypatch.setattr(supervisor, "bounded", lambda schema, **kw: SimpleNamespace(
+        invoke=lambda messages: invoke(schema, messages)))
+
+    def search(query, reg, agent, **kw):
+        fake.searches.append((agent, query))
+        sid = f"W{len(fake.searches):05x}"
+        reg.data[sid] = {"kind": "web", "snippet": "추가 검증 결과", "title": "재조사 근거", "url": "https://example.org/new"}
+        return [sid]
+
+    import tools.web_search
+    monkeypatch.setattr(tools.web_search, "web_search", search)
+    return fake
+
+
+def supervisor_nodes(fakes, inputs=None):
+    """기존 가짜 노드에 인용 근거를 더해 충분성 검토와 Supervisor의 입력 경계를 검사한다."""
+    nodes = fakes.nodes()
+    for name in ANALYSIS:
+        node = nodes[name]
+
+        def run(state, name=name, node=node):
+            if inputs is not None:
+                inputs.append((name, state))
+            out = node(state)
+            ids = ["Wabc12", *state.get("supervisor_research_ids", [])]
+            out[name].update(evidence_ids=ids, pool_ids=ids, criterion={"rows": [
+                {"qid": name, "answer": "YES", "quote": "검증된 사실", "evidence_ids": ["Wabc12"]}]})
+            out["registry"] = {**state.get("registry", {}), "Wabc12": {
+                "kind": "web", "snippet": "검증된 사실", "title": "검증 근거", "url": "https://example.org/evidence"}}
+            return out
+
+        nodes[name] = run
+    return nodes
+
+
+@pytest.mark.parametrize("names, cap, stop, calibrate, expected, end_reason", [
+    ([], 10, False, False, [], "no_eligible"),
+    (["A", "B"], 10, False, False, ["A", "B"], "exhausted"),
+    ([str(i) for i in range(11)], 10, False, False, [str(i) for i in range(10)], "max_evaluations"),
+    (["A", "B"], 10, True, False, ["A"], "invest_found"),
+    (["A", "B"], 10, True, True, ["A", "B"], "exhausted"),
+])
+def test_supervisor_runs_to_completion(supervisor_llm, set_cfg, names, cap, stop, calibrate, expected, end_reason):
+    from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
+
+    set_cfg("workflow.max_evaluations", cap)
+    set_cfg("workflow.stop_on_invest", stop)
+    set_cfg("workflow.calibrate", calibrate)
+    f = Fakes([names], decisions={name: "투자" for name in names})
+    state = {"registry": {}, "discovery_rounds": 0, "iterations": 0, "queue": [], "seen": [],
+             "evaluations": [], "screened": [], "log": [], "rag_traces": []}
+    inputs = []
+    out = build_supervisor_graph(supervisor_nodes(f, inputs)).invoke(state, {"recursion_limit": supervisor_recursion_limit()})
+    assert [e["name"] for e in out.get("evaluations", [])] == expected
+    assert out["end_reason"] == end_reason
+    assert f.calls.count("report") == 1 and not f.stale
+    analysis_calls = [name for name in f.calls if name in {*ANALYSIS, "decide"}]
+    assert analysis_calls == ["tech", "market", "founder", "competition", "decide"] * len(expected)
+    for prompt in supervisor_llm.prompts:
+        if "available_workers" not in prompt:
+            assert set(prompt["completed"]) == set(ANALYSIS)
+            assert prompt["sources"] and all(v["criterion"]["rows"] for v in prompt["analysis"].values())
+            continue
+        done = set(prompt["completed"])
+        ready = set(prompt["available_workers"])
+        assert not done & ready
+        assert "market" not in ready or "tech" in done
+        assert "competition" not in ready or {"founder", "tech"} <= done
+    assert len(out.get("screened", [])) == len(names)
+    assert out["supervisor_final_review"]["sufficient"]
+    assert set(out.get("supervisor_reviews", {})) == set(expected)
+    for name, inbox in inputs:
+        assert "supervisor_inbox" not in inbox and "evaluations" not in inbox
+        if name in {"founder", "tech"}:
+            assert not set(ANALYSIS) & inbox.keys()
+        if name == "market":
+            assert "tech" in inbox and not {"founder", "competition"} & inbox.keys()
+    if calibrate:
+        assert out["report"]["mode"] == "calibrate"
+
+
+def test_supervisor_rejects_invalid_llm_choice(monkeypatch):
+    from types import SimpleNamespace
+    from agents import supervisor
+
+    monkeypatch.setattr(supervisor, "bounded", lambda *a, **kw: SimpleNamespace(
+        invoke=lambda _: supervisor.SupervisorChoice(next_agent="competition", reason="경쟁사부터 비교")))
+    with pytest.raises(ValueError, match="실행 불가능"):
+        supervisor.supervisor_node({"current": {"official_name": "A"}, "supervisor_next": "discover"})
+
+
+def test_supervisor_edges():
+    from graph.supervisor import build_supervisor_graph
+
+    edges = build_supervisor_graph(Fakes([]).nodes()).get_graph().edges
+    expected = {(START, "supervisor"), ("report", END), ("supervisor", "halt"), ("halt", END)}
+    expected |= {("supervisor", name) for name in NODE_NAMES}
+    expected |= {(name, "supervisor") for name in NODE_NAMES if name != "report"}
+    assert {(e.source, e.target) for e in edges} == expected
+    with pytest.raises(ValueError):
+        build_supervisor_graph({"verify": lambda _: {}})
+
+
+@pytest.mark.parametrize("target", ANALYSIS)
+def test_supervisor_reworks_insufficient_view(supervisor_llm, target):
+    from agents.supervisor import EvidenceReview
+    from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
+
+    supervisor_llm.reviews.append(EvidenceReview(
+        sufficient=False, reason="핵심 주장의 제3자 근거 부족", evidence_ids=["Wabc12"],
+        rework_agent=target, queries=["A 유료 고객 설치 실적 검증"]))
+    f = Fakes([["A"]])
+    inputs = []
+    out = build_supervisor_graph(supervisor_nodes(f, inputs)).invoke(
+        {}, {"recursion_limit": supervisor_recursion_limit()})
+    assert f.calls.count(target) == 2
+    assert f.calls.count("decide") == f.calls.count("report") == 1
+    assert supervisor_llm.searches == [(target, "A 유료 고객 설치 실적 검증")]
+    retried = [inbox for name, inbox in inputs if name == target][-1]
+    assert retried["supervisor_research_ids"] == ["W00001"]
+    assert "W00001" in retried["current"]["evidence_ids"]
+    assert out[target]["pool_ids"] == ["Wabc12", "W00001"]
+    assert out["supervisor_reviews"]["A"]["supervisor_reworks"] == 1
+    assert out["supervisor_final_review"]["sufficient"]
+    reviews = [p for p in supervisor_llm.prompts if "available_workers" not in p]
+    assert len(reviews) == 2 and "W00001" in reviews[-1]["sources"]
+    if target == "tech":
+        assert f.calls.count("market") == f.calls.count("competition") == 2
+        assert [s for name, s in inputs if name == "market"][-1].get("market_cache") == {}
+    if target == "founder":
+        assert f.calls.count("competition") == 2
+
+
+def test_supervisor_stops_without_report_when_rework_exhausted(supervisor_llm, set_cfg):
+    from agents.supervisor import EvidenceReview
+    from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
+
+    set_cfg("supervisor.max_reworks_per_candidate", 1)
+    supervisor_llm.reviews.extend([
+        EvidenceReview(sufficient=False, reason="시장 수요 근거 부족", evidence_ids=[],
+                       rework_agent="market", queries=["A 시장 수요 실증"]),
+        EvidenceReview(sufficient=False, reason="추가 검색 후에도 시장 수요 확인 불가", evidence_ids=[],
+                       rework_agent="market", queries=["A 시장 수요 실측"]),
+    ])
+    f = Fakes([["A"]])
+    out = build_supervisor_graph(supervisor_nodes(f)).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
+    assert f.calls.count("market") == 2
+    assert "decide" not in f.calls and "report" not in f.calls
+    assert out["end_reason"] == "insufficient_evidence" and out["report"]["pdf"] is None
+    assert not out["supervisor_final_review"]["sufficient"]
+    assert out["supervisor_reviews"]["A"]["reason"] == "추가 검색 후에도 시장 수요 확인 불가"
+
+
+def test_supervisor_rejects_fabricated_evidence(supervisor_llm):
+    from agents.supervisor import EvidenceReview
+    from graph.supervisor import build_supervisor_graph
+
+    supervisor_llm.reviews.append(EvidenceReview(sufficient=True, reason="충분", evidence_ids=["Wfake99"],
+                                                rework_agent=None, queries=[]))
+    f = Fakes([["A"]])
+    with pytest.raises(ValueError, match="실재하는 근거"):
+        build_supervisor_graph(supervisor_nodes(f)).invoke({}, {"recursion_limit": 100})
+    assert "decide" not in f.calls and "report" not in f.calls
+
+
+@pytest.mark.parametrize("new_queries, expected_searches, sufficient", [
+    (["A 고객 확인", "A 매출 확인"], ["A 고객 확인", "A 매출 확인"], True),
+    (["A 고객 확인"], ["A 고객 확인", "A 매출 확인"], True),
+    (["A 고객 확인"], ["A 고객 확인"], False),
+])
+def test_supervisor_handles_repeated_rework_queries(supervisor_llm, new_queries, expected_searches, sufficient):
+    from agents.supervisor import EvidenceReview
+    from graph.supervisor import build_supervisor_graph, supervisor_recursion_limit
+
+    def shortage(queries):
+        return EvidenceReview(sufficient=False, reason="추가 검증 필요", evidence_ids=[],
+                              rework_agent="market", queries=queries)
+
+    supervisor_llm.reviews.extend([shortage(["A 고객 확인"]), shortage(new_queries)])
+    if new_queries == ["A 고객 확인"]:
+        supervisor_llm.reviews.append(shortage(["A 매출 확인"] if sufficient else ["A 고객 확인"]))
+    f = Fakes([["A"]])
+    out = build_supervisor_graph(supervisor_nodes(f)).invoke({}, {"recursion_limit": supervisor_recursion_limit()})
+    assert [query for _, query in supervisor_llm.searches] == expected_searches
+    assert out["supervisor_final_review"]["sufficient"] is sufficient
+    assert f.calls.count("report") == int(sufficient)
+    assert any(p.get("feedback") for p in supervisor_llm.prompts) == (new_queries == ["A 고객 확인"])
+
+
+def test_supervisor_worker_input_is_isolated():
+    from graph.supervisor import worker_node
+
+    inbox = {"current": {"official_name": "A"}, "registry": {"Wabc12": {"snippet": "원문"}}}
+
+    def node(state):
+        assert "market" not in state
+        state["current"]["official_name"] = "변경"
+        state["registry"]["Wabc12"]["snippet"] = "변경"
+        return {"founder": {"name": "A"}}
+
+    worker_node("founder", node)({"supervisor_inbox": inbox, "market": {"hidden": True}}, {})
+    assert inbox["current"]["official_name"] == "A" and inbox["registry"]["Wabc12"]["snippet"] == "원문"
+
+
+def test_supervisor_can_choose_different_order(supervisor_llm):
+    from graph.supervisor import build_supervisor_graph
+
+    supervisor_llm.order = ["founder", "tech", "competition", "market"]
+    f = Fakes([["A"]])
+    build_supervisor_graph(supervisor_nodes(f)).invoke({}, {"recursion_limit": 100})
+    assert [n for n in f.calls if n in ANALYSIS] == ["founder", "tech", "competition", "market"]
+
+
 # ── 분기 함수
 @pytest.mark.parametrize("state, calibrate, expected", [
     ({"decision": "투자", "iterations": 1}, False, "discover"),      # 투자 추천이어도 멈추지 않고 다음 후보
@@ -300,6 +533,45 @@ def test_app_scenario_run_writes_run_log(fake_app):
     assert list(log["evaluations"][0]) == ["name", "region", "stage", "decision", "hold_type", "multiplier",
                                            "score100", "reasons", "flip", "roi", "criteria", "rows"]
     assert not (tmp / "outputs/run_log.json").exists()  # 제출 폴더는 건드리지 않는다
+
+
+def test_app_supervisor_writes_run_log(fake_app, supervisor_llm, monkeypatch):
+    from graph import supervisor
+
+    app, fakes, tmp = fake_app
+    real_builder = supervisor.build_supervisor_graph
+    monkeypatch.setattr(supervisor, "build_supervisor_graph", lambda: real_builder(supervisor_nodes(fakes)))
+    checked = []
+    monkeypatch.setattr(app, "require_keys", lambda: checked.append(True))
+    app.main(["--fresh", "--supervisor", "--out", "outputs/supervisor_report"])
+    log = json.loads((tmp / "outputs/supervisor_report/run_log.json").read_text(encoding="utf-8"))
+    assert checked == [True]
+    assert log["orchestration"] == "supervisor" and log["evaluated"] == 3
+    assert any(line.startswith("[Supervisor]") for line in log["log"])
+    assert get_config().cache.dir == "cache_fresh"
+    assert log["report"]["scenario"] is True
+    assert log["supervisor"]["final_review"]["sufficient"]
+
+
+def test_app_insufficient_calibration_does_not_update_reference(fake_app, supervisor_llm, monkeypatch, set_cfg):
+    from agents.supervisor import EvidenceReview
+    from graph import supervisor
+
+    set_cfg("supervisor.max_reworks_per_candidate", 0)
+    supervisor_llm.reviews.append(EvidenceReview(sufficient=False, reason="근거 없음", evidence_ids=[],
+                                                rework_agent="tech", queries=["A 제품 실증"]))
+    app, fakes, tmp = fake_app
+    real_builder = supervisor.build_supervisor_graph
+    monkeypatch.setattr(supervisor, "build_supervisor_graph", lambda: real_builder(supervisor_nodes(fakes)))
+    monkeypatch.setattr(app, "require_keys", lambda: None)
+    monkeypatch.setattr(app, "finish_calibration", lambda *a: pytest.fail("부족한 근거로 기준을 갱신하면 안 됨"))
+    with pytest.raises(SystemExit) as stopped:
+        app.main(["--fresh", "--supervisor", "--calibrate"])
+    assert stopped.value.code == 2
+    log = json.loads((tmp / "outputs/calibration/run_log.json").read_text(encoding="utf-8"))
+    assert log["end_reason"] == "insufficient_evidence" and not log["supervisor"]["final_review"]["sufficient"]
+    assert "report" not in fakes.calls and "decide" not in fakes.calls
+    assert not (tmp / "data/reference_class.json").exists()
 
 
 def test_app_calibrate_writes_reference_class(fake_app, monkeypatch):

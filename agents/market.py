@@ -136,7 +136,7 @@ def market_node(state: dict) -> dict:
     traces = [{"agent": AGENT, "question": question, "step": "decompose", "trace": [],
                "sub_questions": [s.question for s in subs], "padded_with_defaults": padded,
                "added_investment_question": added}]
-    ids: list[str] = []
+    ids: list[str] = list(state.get("supervisor_research_ids", []))
     answers = []
     for s in subs:
         r = rag.answer_question(s.question, s.purpose, reg, AGENT, allow_direct=False)
