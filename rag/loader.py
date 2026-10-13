@@ -1,10 +1,8 @@
 """문서 로딩과 전처리.
 
-실습에서 겪은 문제를 반영했다.
-- 출처·각주 줄이 본문과 섞이면 모델이 엉뚱한 날짜/수치를 인용한다 → 본문에서 분리해 메타데이터로 보관.
-- 매 페이지 반복되는 머리글·바닥글(보고서 제목, 쪽 번호)은 검색을 방해한다 → 제거.
-- 2단 편집은 좌·우 단을 섞어 읽는다 → 블록을 단(column) 순서로 정렬.
-- 표는 행·열이 흩어진다 → 표를 따로 마크다운으로 추출해 별도 조각으로 추가.
+- 출처·각주 줄은 본문에서 분리해 메타데이터로 보관
+- 반복되는 머리글·바닥글 제거, 2단 편집은 단 순서로 정렬
+- 표는 마크다운으로 따로 추출해 별도 조각으로 추가
 """
 from __future__ import annotations
 
@@ -97,7 +95,7 @@ def load_documents() -> tuple[list[Document], list[dict]]:
             try:
                 for t in doc[pno - 1].find_tables().tables:
                     cells = [c for row in t.extract() for c in row if c]
-                    # 디자인 박스를 표로 오인하는 경우 제외: 3행·2열 이상, 셀이 짧은(표다운) 경우만
+                    # 3행·2열 이상, 셀이 짧은 경우만 표로 본다
                     if t.row_count < 3 or t.col_count < 2 or not cells:
                         continue
                     if sum(len(str(c)) for c in cells) / len(cells) > 60:
@@ -131,8 +129,7 @@ def total_pages() -> int:
 
 @lru_cache(maxsize=1)
 def corpus_summary() -> str:
-    """코퍼스 요약 '{문서 수}종 {사용 쪽수}쪽, {최초}~{최근}년 발행' (data/manifest.yaml 과 total_pages 로 계산).
-    검색 도구 설명(tools/agent_tools.py)에 들어가므로 코퍼스를 바꾸면 설명도 저절로 바뀐다."""
+    """코퍼스 요약 '{문서 수}종 {사용 쪽수}쪽, {최초}~{최근}년 발행' (검색 도구 설명에 들어감)."""
     docs = load_manifest()
     years = [int(d["year"]) for d in docs]
     return f"{len(docs)}종 {total_pages()}쪽, {min(years)}~{max(years)}년 발행"

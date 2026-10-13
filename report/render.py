@@ -10,6 +10,7 @@ from core.config import ROOT
 
 A4_HEIGHT_PX = 1122.5  # 297mm @ 96dpi
 CONTENT_WIDTH_PX = 680  # 210mm - 좌우 여백 15mm×2 = 180mm @ 96dpi
+MAX_DENSITY = 3  # 조판 밀도 단계 0~MAX_DENSITY (report.html.j2 의 단계별 값 목록과 길이를 맞춘다)
 
 
 def render_html(context: dict, density: int = 0) -> str:

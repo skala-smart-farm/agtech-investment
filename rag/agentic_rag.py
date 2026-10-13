@@ -1,21 +1,13 @@
 """Agentic RAG. 경로가 두 개 있다.
 
-1) agentic_rag() — v1 교정형 경로 (build_evidence_graph, 탐색 에이전트용, 답변 생성 없음)
-   retrieve(하이브리드 검색) → grade(Judge LLM 이 조각별 관련성 O/X) →
-     관련 조각이 충분하면(min_relevant 이상) finish
-     부족하면 rewrite(질의 재작성) 후 다시 retrieve  (최대 max_rewrites 회)
-     그래도 부족하면 web(웹 검색으로 보완, Corrective RAG) → finish
-   관련 조각은 검색기 순위(Kiwi BM25 + FAISS 의 RRF 순위) 그대로 두고 앞에서부터 top_k 개만 컨텍스트로 쓴다.
-   top_k 때문에 버린 관련 조각 수는 trace 에 kept/dropped 로 남긴다 (순위가 실제로 무엇을 버렸는지 보이게).
-   LLM 입력(프롬프트·조각 목록 형식)과 웹 보완 인자가 v1 과 같다. 그래야 v1 캐시가 맞아 발굴 결과가 바뀌지 않는다.
+1) agentic_rag() — 교정형 경로 (탐색 에이전트용, 답변 생성 없음)
+   retrieve → grade(조각별 관련성 O/X) → 충분하면 finish
+   부족하면 rewrite 후 다시 retrieve (최대 max_rewrites 회), 그래도 부족하면 web 보완 → finish
 
-2) answer_question() — v2 서브그래프 (build_rag_graph, 기술·시장성 에이전트와 답변 평가 eval_judge 가 쓴다)
-   agent   : LLM 이 도구를 고른다 (search_documents / web_search / 둘 다 / 직접 답은 allow_direct 일 때만)
-   retrieve·grade·rewrite·web : 1) 과 같은 코드·프롬프트 (web 은 도구 인자 또는 v1 보완 인자)
-   generate: 근거 id 를 문장마다 인용한 답변
-   check   : Self-RAG 점검. 코드가 답변 속 수치가 근거에 있는지 먼저 보고, 통과하면 LLM 이 이진 2문항으로 판정
-             grounded → finish / not_grounded → 답변만 다시(max_regenerations) / not_useful → 질의를 고쳐 다시 검색
-   근거 저장소(SourceRegistry)는 호출한 에이전트의 객체 하나를 노드들이 제자리에서 갱신한다(복사본을 만들지 않음).
+2) answer_question() — 서브그래프 (기술·시장성 에이전트용)
+   agent(도구 선택) → retrieve·grade·rewrite·web → generate(근거 id 인용 답변)
+   → check(Self-RAG: 코드 수치 대조 후 LLM 판정)
+     grounded → finish / not_grounded → 답변만 다시 / not_useful → 질의를 고쳐 다시 검색
 """
 from __future__ import annotations
 
@@ -63,9 +55,9 @@ class Rewrite(BaseModel):
     query: str = Field(description="검색에 더 잘 걸리도록 고친 질의 (핵심 명사·수치 표현 포함)")
 
 
-# ── LLM 판단부 (테스트에서 monkeypatch 로 바꿔 끼운다)
+# ── LLM 판단부
 def _grade_llm(question: str, purpose: str, chunks: list[dict]) -> set[int]:
-    """조각별 관련 O/X. 관련 조각 번호 집합을 돌려준다 (프롬프트·조각 목록 형식은 v1 그대로)."""
+    """조각별 관련 O/X. 관련 조각 번호 집합을 돌려준다."""
     listing = "\n\n".join(
         f"[{i}] ({c['meta'].get('publisher')} {c['meta'].get('year')}, p.{c['meta'].get('page')})\n{c['text'][:900]}"
         for i, c in enumerate(chunks))
@@ -75,13 +67,13 @@ def _grade_llm(question: str, purpose: str, chunks: list[dict]) -> set[int]:
 
 
 def _rewrite_llm(question: str, purpose: str, tried: list[str]) -> str:
-    """이미 시도한 질의와 다른 검색 질의 (프롬프트·입력 형식은 v1 그대로)."""
+    """이미 시도한 질의와 다른 검색 질의."""
     res: Rewrite = structured(Rewrite).invoke(
         render("rag_rewrite", question=question, purpose=purpose, tried="\n".join(tried)))
     return res.query
 
 
-# ── 1) v1 교정형 경로 노드 (v2 서브그래프도 retrieve·grade 를 그대로 쓴다)
+# ── 1) 교정형 경로 노드 (서브그래프도 retrieve·grade 를 같이 쓴다)
 def _retrieve(state: RAGState) -> dict:
     cfg = get_config()
     docs = get_hybrid_retriever().invoke(state["query"])[: cfg.rag.candidate_k]
@@ -97,7 +89,6 @@ def _grade(state: RAGState) -> dict:
                                             "kept": 0, "dropped": 0}]}
     ok = _grade_llm(state["question"], state["purpose"], chunks)
     seen = {c["meta"]["chunk_id"] for c in state["relevant"]}
-    # 관련 판정 조각을 검색기 순위 순서 그대로 (재정렬 없음)
     new = [(i, c) for i, c in enumerate(chunks) if i in ok and c["meta"]["chunk_id"] not in seen]
     room = max(0, cfg.rag.top_k - len(state["relevant"]))
     kept = new[:room]  # top_k 를 넘는 관련 조각은 버린다
@@ -136,7 +127,7 @@ def _finish(state: RAGState) -> dict:
 
 
 def build_evidence_graph():
-    """v1 교정형 경로 그래프 (생성 없음). agentic_rag() 가 쓴다."""
+    """교정형 경로 그래프 (생성 없음)."""
     g = StateGraph(RAGState)
     g.add_node("retrieve", _retrieve)
     g.add_node("grade", _grade)
@@ -156,9 +147,7 @@ _RAG = None
 
 
 def agentic_rag(question: str, purpose: str, registry: SourceRegistry, agent: str) -> tuple[list[str], list[dict]]:
-    """질문 하나에 대한 근거 id 목록과 수행 기록(trace)을 돌려준다. registry 는 제자리에서 갱신된다.
-    v1 교정형 경로(검색·채점·재작성·웹 보완, 답변 생성 없음) 그대로다. 탐색 에이전트가 기업명 추출용 근거를 모을 때 쓴다
-    (기술·시장성 에이전트는 v2 에서 answer_question 을 쓴다)."""
+    """질문 하나에 대한 근거 id 목록과 수행 기록(trace). registry 는 제자리에서 갱신된다."""
     global _RAG
     if _RAG is None:
         _RAG = build_evidence_graph()
@@ -171,8 +160,7 @@ def agentic_rag(question: str, purpose: str, registry: SourceRegistry, agent: st
 
 @lru_cache(maxsize=1)
 def corpus_catalog() -> str:
-    """도구 선택 LLM 이 코퍼스에 무엇이 있는지 알도록 문서 목록(기관·연도·제목)을 만든다.
-    출력 문자열은 v1 agents/market.py 의 corpus_catalog 와 같다 (market_decompose 프롬프트 입력 = 캐시 키)."""
+    """코퍼스 문서 목록(기관·연도·제목). LLM 이 코퍼스에 무엇이 있는지 알도록 프롬프트에 넣는다."""
     docs: dict[str, str] = {}
     for ch in get_chunks():
         m = ch.metadata
@@ -180,7 +168,7 @@ def corpus_catalog() -> str:
     return "\n".join(docs.values())
 
 
-# ── 2) v2 서브그래프: 도구 선택 → 검색 → 채점 → 재작성/웹 보완 → 인용 답변 생성 → Self-RAG 점검
+# ── 2) 서브그래프: 도구 선택 → 검색 → 채점 → 재작성/웹 보완 → 답변 생성 → 점검
 class AnswerState(TypedDict):
     question: str
     purpose: str
@@ -226,9 +214,7 @@ CHECK_RANK = {"grounded": 2, "not_useful": 1, "not_grounded": 0}  # not_useful �
 
 
 def _agent_decide(question: str, purpose: str, run_date: str, allow_web: bool, allow_direct: bool) -> dict:
-    """도구 선택 LLM. 도구 이름·설명(docstring)·인자를 bind_tools 로 알려 주고, 고른 도구 호출(tool_calls)을 읽는다.
-    도구 실행은 여기서 하지 않는다(retrieve·web 노드가 같은 근거 저장소로 실행). allow_direct 가 False 면
-    tool_choice='required' 로 도구를 반드시 하나 이상 고르게 한다."""
+    """도구 선택 LLM (bind_tools). 도구 실행은 retrieve·web 노드가 한다."""
     tools = make_tools(SourceRegistry(), "rag")  # 스키마만 쓴다
     bound = [tools["search_documents"]] + ([tools["web_search"]] if allow_web else [])
     llm = get_llm("generator").bind_tools(bound, **({} if allow_direct else {"tool_choice": "required"}))
@@ -239,8 +225,7 @@ def _agent_decide(question: str, purpose: str, run_date: str, allow_web: bool, a
 
 
 def parse_tool_calls(calls: list[dict], content: str, question: str, allow_web: bool, allow_direct: bool) -> dict:
-    """tool_calls → 경로. 두 도구를 함께 부르면 both(문서 기준 수치 + 최신 뉴스). 같은 도구를 여러 번 부르면 첫 호출만 쓴다.
-    도구를 고르지 않았는데 직접 답이 허용되지 않으면 질문 그대로 문서 검색(docs)."""
+    """tool_calls → 경로 docs | web | both | direct."""
     docs = next((c.get("args") or {} for c in calls if c.get("name") == "search_documents"), None)
     web = next((c.get("args") or {} for c in calls if c.get("name") == "web_search"), None) if allow_web else None
     if docs is not None and web is not None:
@@ -287,14 +272,13 @@ def _canon(n: str) -> str:
 
 
 def numbers(text: str) -> list[str]:
-    """글 속 수치(정규화). 인용 괄호 [D1a2b3] 안의 숫자는 빼고, 천 단위 쉼표는 없앤다('5,000억' → 5000)."""
+    """글 속 수치 (인용 id 안 숫자 제외, 쉼표 제거)."""
     t = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", re.sub(r"\[[^\]]*\]", " ", text or ""))
     return [_canon(n) for n in _NUM.findall(t)]
 
 
 def unsupported_numbers(answer: str, evidence: str, known: str = "") -> list[str]:
-    """답변 속 수치 중 근거에 없는 것. 오탐을 줄이려고 두 자리 이상 수치만 보고(한 자리·'1조' 같은 표기 차이 제외),
-    4자리 연도와 질문·목적·기준일(known)에 이미 나온 수치는 제외한다."""
+    """답변 속 두 자리 이상 수치 중 근거에 없는 것 (연도·질문에 나온 수치 제외)."""
     have = set(numbers(evidence)) | set(numbers(known))
     out = []
     for n in numbers(answer):
@@ -310,8 +294,7 @@ def _searched(state: AnswerState) -> bool:
 
 
 def _context(reg: SourceRegistry, ids: list[str]) -> str:
-    """generate·check 에 넘기는 근거 목록 (reg.brief): 문서 조각은 rag.context_doc_chars(조각이 800자라 사실상 전부),
-    웹 근거는 스니펫 rag.context_web_chars 까지."""
+    """generate·check 에 넘기는 근거 목록."""
     r = get_config().rag
     docs = reg.brief([i for i in ids if i.startswith("D")], r.context_doc_chars)
     webs = reg.brief([i for i in ids if i.startswith("W")], r.context_web_chars)
@@ -319,8 +302,7 @@ def _context(reg: SourceRegistry, ids: list[str]) -> str:
 
 
 def build_rag_graph(reg: SourceRegistry | None = None):
-    """v2 Agentic RAG 서브그래프. 노드는 reg(호출한 에이전트의 근거 저장소 객체 하나)를 제자리에서 갱신한다.
-    reg 를 주지 않으면 빈 저장소를 쓴다(그래프 모양 확인용)."""
+    """Agentic RAG 서브그래프. 노드는 reg 를 제자리에서 갱신한다."""
     reg = reg if reg is not None else SourceRegistry()
 
     def agent(state: AnswerState) -> dict:
@@ -345,17 +327,17 @@ def build_rag_graph(reg: SourceRegistry | None = None):
     def rewrite(state: AnswerState) -> dict:
         tried = [t["query"] for t in state["trace"] if t.get("step") == "grade"]
         out = {"query": _rewrite_llm(state["question"], state["purpose"], tried), "rewrites": state["rewrites"] + 1}
-        if state["check"] == "not_useful":  # 답변이 질문에 맞지 않음 → 지금 조각은 비우고 고친 질의로 새로 모은다
+        if state["check"] == "not_useful":  # 지금 조각은 비우고 고친 질의로 새로 모은다
             out["relevant"] = []
         out["trace"] = state["trace"] + [{"step": "rewrite", "query": out["query"], "after": state["check"] or "grade"}]
         return out
 
     def web(state: AnswerState) -> dict:
-        if state["route"] in ("web", "both") and not state["web_done"]:  # agent 가 고른 web_search 도구 인자
+        if state["route"] in ("web", "both") and not state["web_done"]:
             q = state["web_query"]
             ids = web_search(q, reg, agent=state["agent"], topic="news", recent=state["recent"])
             entry = {"step": "web", "query": q, "recent": state["recent"], "web_results": len(ids)}
-        else:  # 교정형 보완: v1 과 같은 인자
+        else:  # 교정형 보완
             q = state["question"]
             ids = web_search(q, reg, agent=state["agent"], topic="general", recent=False, max_results=4)
             entry = {"step": "web", "query": q, "web_fallback": len(ids)}
@@ -363,7 +345,7 @@ def build_rag_graph(reg: SourceRegistry | None = None):
                 "trace": state["trace"] + [entry]}
 
     def generate(state: AnswerState) -> dict:
-        if state["route"] == "direct" and not _searched(state):  # 검색 없이 agent 가 쓴 답을 그대로 점검에 넘긴다
+        if state["route"] == "direct" and not _searched(state):
             return {"cited_ids": [], "context_ids": [],
                     "trace": state["trace"] + [{"step": "generate", "direct": True}]}
         doc_ids = [reg.add_doc(c["meta"], c["text"], agent=state["agent"], query=state["question"])
@@ -382,12 +364,11 @@ def build_rag_graph(reg: SourceRegistry | None = None):
     def check(state: AnswerState) -> dict:
         ids = state["context_ids"]
         context = _context(reg, ids)
-        # 수치 대조 대상: generate 가 받은 근거 목록 + 그 근거들의 본문 (인용 id 가 틀린 경우는 LLM 점검이 본다)
         evidence = context + "\n" + " ".join(reg.text(i) for i in ids)
         known = " ".join((state["question"], state["purpose"], state["run_date"]))
         bad = unsupported_numbers(state["answer"], evidence, known)
         entry = {"step": "check"}
-        if bad:  # 코드 수치 대조에서 걸리면 LLM 점검 없이 not_grounded
+        if bad:
             verdict = "not_grounded"
             feedback = (f"근거에 없는 수치: {', '.join(bad)}. 근거에 있는 수치만 근거 표기 그대로(단위 환산 없이) 쓰고, "
                         "근거에 없는 내용은 빼라.")
@@ -401,7 +382,7 @@ def build_rag_graph(reg: SourceRegistry | None = None):
         entry["check"] = verdict
         out = {"check": verdict, "feedback": feedback, "trace": state["trace"] + [entry]}
         best = state.get("best") or {}
-        if not best or CHECK_RANK[verdict] >= CHECK_RANK[best["check"]]:  # 재작성·재생성한 답이 더 나빠지면 앞의 답을 남긴다
+        if not best or CHECK_RANK[verdict] >= CHECK_RANK[best["check"]]:
             out["best"] = {"check": verdict, "answer": state["answer"], "cited_ids": state["cited_ids"],
                            "context_ids": state["context_ids"]}
         return out
@@ -436,14 +417,14 @@ def build_rag_graph(reg: SourceRegistry | None = None):
     return g.compile()
 
 
-# 설계서 그림과 비교하는 v2 서브그래프 간선 (tests/test_rag_subgraph.py 가 컴파일된 그래프와 같은지 확인)
+# 서브그래프 간선 (테스트가 컴파일된 그래프와 비교)
 RAG_EDGES = {(START, "agent"), ("agent", "retrieve"), ("agent", "web"), ("agent", "generate"), ("retrieve", "grade"),
              ("grade", "generate"), ("grade", "rewrite"), ("grade", "web"), ("rewrite", "retrieve"),
              ("web", "generate"), ("generate", "check"), ("check", "finish"), ("check", "generate"),
              ("check", "rewrite"), ("check", "retrieve"), ("finish", END)}
 
 
-# ── 라우터 (순수 함수)
+# ── 라우터
 def route_after_agent(state: AnswerState) -> Literal["retrieve", "web", "generate"]:
     """docs·both → 문서 검색, web → 웹 검색, direct → 검색 없이 점검으로."""
     return {"docs": "retrieve", "both": "retrieve", "web": "web"}.get(state["route"], "generate")
@@ -485,16 +466,14 @@ RESULT_KEYS = ("answer", "evidence_ids", "cited_ids", "status", "check", "route"
 
 def answer_question(question: str, purpose: str, registry: SourceRegistry, agent: str, *,
                     allow_web: bool = True, allow_direct: bool = False) -> dict:
-    """질문 하나에 근거를 달아 답한다 (계약 C4, v2 서브그래프).
+    """질문 하나에 근거를 달아 답한다.
     반환: {'answer': str, 'evidence_ids': [str], 'cited_ids': [str], 'status': 'grounded'|'partial'|'not_found',
            'check': 마지막으로 고른 답의 점검 결과 grounded|not_useful|not_grounded,
            'route': 'docs'|'web'|'both'|'direct', 'rewrites': int, 'regenerations': int, 'trace': [dict]}
     - evidence_ids: 답변이 인용한 근거 id (인용이 없으면 generate 가 본 근거 전부)
     - answer: 점검한 답 중 가장 나은 것(grounded > not_useful > not_grounded, 같으면 나중 것)
     - status: 인용 없이 '확인되지 않음'이면 not_found, 점검을 통과하고 빠진 부분이 없으면 grounded, 그 밖은 partial
-    - route: agent 가 고른 경로. both 는 두 도구를 함께 부른 경우(문서 기준 수치 + 최신 뉴스)
-    registry 는 제자리에서 갱신된다(노드가 같은 객체에 근거를 등록). allow_direct(검색 없이 답하기)의 기본값은
-    False 다(수치 환각 방지, 분석 에이전트 호출). allow_web=False 면 web_search 도구와 웹 보완을 쓰지 않는다."""
+    allow_direct(검색 없이 답하기)는 수치 환각 방지를 위해 기본 False."""
     out = build_rag_graph(registry).invoke(
         initial_state(question, purpose, agent, run_date(), allow_web=allow_web, allow_direct=allow_direct),
         config={"recursion_limit": get_config().rag.rag_recursion_limit})
@@ -503,7 +482,7 @@ def answer_question(question: str, purpose: str, registry: SourceRegistry, agent
 
 def initial_state(question: str, purpose: str, agent: str, date: str, *, allow_web: bool,
                   allow_direct: bool) -> AnswerState:
-    """v2 서브그래프 입력 State."""
+    """서브그래프 입력 State."""
     return {"question": question, "purpose": purpose, "agent": agent, "run_date": date, "allow_web": allow_web,
             "allow_direct": allow_direct, "route": "", "query": question, "web_query": question, "recent": True,
             "retrieved": [], "relevant": [], "web_ids": [], "web_done": False, "context_ids": [], "answer": "",
@@ -513,13 +492,7 @@ def initial_state(question: str, purpose: str, agent: str, date: str, *, allow_w
 
 def answer_question_v1(question: str, purpose: str, registry: SourceRegistry, agent: str, *,
                        allow_web: bool = True, allow_direct: bool = False) -> dict:
-    """v1 호환 구현(폴백용): 교정형 경로(agentic_rag)로 근거 id 만 모은다. 답변 생성·점검은 하지 않는다.
-    - answer 는 빈 문자열, cited_ids 는 빈 목록 (호출한 에이전트가 근거를 직접 읽고 분석한다)
-    - status: 근거 id 가 있으면 'grounded', 없으면 'not_found' / route: 항상 'docs'
-    - rewrites: 질의 재작성 횟수 (trace 의 검색 기록 수 − 1), regenerations: 0
-    - allow_web·allow_direct 는 v2 와 같은 시그니처를 위해 받기만 한다. v1 경로에는 direct 가 없고,
-      웹 보완 여부는 config rag.web_fallback 이 정한다.
-    v2 서브그래프에 문제가 생기면 answer_question 대신 이 함수를 쓰면 된다. registry 는 제자리에서 갱신된다."""
+    """폴백용: 교정형 경로로 근거 id 만 모은다 (답변 생성·점검 없음). answer_question 과 같은 형식으로 돌려준다."""
     ids, trace = agentic_rag(question, purpose, registry, agent)
     rewrites = max(0, sum(1 for t in trace if "retrieved" in t) - 1)
     return {"answer": "", "evidence_ids": ids, "cited_ids": [], "status": "grounded" if ids else "not_found",

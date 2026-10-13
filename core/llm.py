@@ -29,7 +29,7 @@ def _ensure_cache() -> None:
 
 
 def _block_network() -> None:
-    """--offline: 캐시에 없는 LLM 호출만 실패시킨다. 모델 설정(=캐시 키)은 그대로 둬야 캐시가 맞는다."""
+    """--offline: 캐시에 없는 LLM 호출을 실패시킨다."""
     def _refuse(self, *args, **kwargs):
         raise RuntimeError("--offline: 재현용 캐시에 없는 LLM 호출입니다 (프롬프트나 근거가 제출본과 다름)")
 
@@ -41,7 +41,7 @@ def get_llm(role: str = "generator") -> ChatOpenAI:
     """role: generator(분석·작성) | judge(판정)."""
     _ensure_cache()
     cfg = get_config()
-    if not os.getenv("OPENAI_API_KEY"):  # 캐시 재현 모드: 키 없이 만들되, 캐시에 없는 호출이면 그때 명확히 실패
+    if not os.getenv("OPENAI_API_KEY"):  # 캐시만으로 실행할 때는 키가 없어도 된다
         os.environ["OPENAI_API_KEY"] = "sk-replay-only-no-key"
     if os.getenv("REPLAY_OFFLINE"):
         _block_network()

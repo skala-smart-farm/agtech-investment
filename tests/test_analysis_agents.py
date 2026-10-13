@@ -196,7 +196,7 @@ def test_founder_node_contract_and_grounding(monkeypatch, judge_calls, no_enrich
 
     assert set(out) == {"founder", "registry", "log"}
     f = out["founder"]
-    c8 = {"t0", "t0_source", "years_since_t0", "people", "milestones", "milestones_24m", "headcount", "hires_per_year",
+    c8 = {"t0", "t0_source", "years_since_t0", "people", "milestones", "milestones_recent", "headcount", "hires_per_year",
           "team_assessment", "evidence_ids", "pool_ids", "criterion"}
     assert c8 <= set(f)
     # 근거에 이름이 없는 인물(홍길동)은 버린다
@@ -206,7 +206,7 @@ def test_founder_node_contract_and_grounding(monkeypatch, judge_calls, no_enrich
     assert f["people"][0]["before_t0"] is True
     # 날짜·근거 id·근거 속 연도가 모두 있는 마일스톤만 남고, 기준일 뒤(예정)는 버린다
     assert f["milestones"] == [{"date": "2025-03", "what": "스마트농업 혁신상 수상", "evidence_ids": [a_id]}]
-    assert f["milestones_24m"] == 1
+    assert f["milestones_recent"] == 1
     assert f["headcount"] == 12 and f["years_since_t0"] == 6.3 and f["hires_per_year"] == round(12 / 6.3, 1)
     assert set(f["evidence_ids"]) <= set(f["pool_ids"]) and i_id in f["evidence_ids"]
     # 판정: founder 차원 1회, 이 노드에서 새로 모은 근거가 풀에 들어간다

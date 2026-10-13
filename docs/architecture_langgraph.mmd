@@ -5,23 +5,32 @@ config:
 ---
 graph TD;
 	__start__([<p>__start__</p>]):::first
+	supervisor(supervisor)
 	founder(founder)
 	tech(tech)
 	market(market)
 	competition(competition)
 	decide(decide)
 	report(report)
+	evaluate(evaluate)
 	__end__([<p>__end__</p>]):::last
-	__start__ --> discover\3a__start__;
-	competition --> decide;
-	decide -.-> discover\3a__start__;
-	decide -.-> report;
-	discover\3a__end__ -.-> founder;
-	discover\3a__end__ -.-> report;
-	founder --> tech;
-	market --> competition;
-	tech --> market;
-	report --> __end__;
+	__start__ --> supervisor;
+	competition --> supervisor;
+	decide --> supervisor;
+	discover\3a__end__ --> supervisor;
+	evaluate -. &nbsp;end&nbsp; .-> __end__;
+	evaluate -.-> report;
+	founder --> supervisor;
+	market --> supervisor;
+	report --> evaluate;
+	supervisor -.-> competition;
+	supervisor -.-> decide;
+	supervisor -.-> discover\3a__start__;
+	supervisor -.-> founder;
+	supervisor -.-> market;
+	supervisor -.-> report;
+	supervisor -.-> tech;
+	tech --> supervisor;
 	subgraph discover
 	discover\3a__start__(<p>__start__</p>)
 	discover\3acollect(collect)

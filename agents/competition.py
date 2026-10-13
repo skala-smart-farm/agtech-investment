@@ -1,12 +1,9 @@
-"""🥊 경쟁사 비교 에이전트 (Scorecard '경쟁 우위 10%', 문항 C1~C4).
+"""경쟁사 비교 에이전트 (Scorecard 경쟁 우위 10%, 문항 C1~C4).
 
-기술 요약 결과(제품·핵심 기술·회사 측 차별점 주장 claims)를 받아, 국내·해외 경쟁사와 실제로 비교해 차별성과 진입장벽을 검증한다.
-- 경쟁사는 분야 이름("애그테크")이 아니라 대상의 **제품 유형**(예: 온실 과채류 수확 로봇)으로 찾는다.
-  LLM 이 제품 설명에서 제품 유형과 검색 질의를 정하고(검색 계획), 에이전트가 그 질의로 검색한다.
-- 대상 회사 기사 본문에 경쟁사로 직접 언급된 회사(예: "영국 더그투스 등 … 외국 경쟁사")는 코드로 뽑아 반드시 검토한다.
-- 경쟁사 행마다 근거 id 를 달고, 이름이 근거에 없는 경쟁사는 버린다. 대상의 우위는 단정하지 않고 "회사 측 주장"으로 쓴다.
-- 기술 요약의 차별점 주장(claims)마다 '제3자 확인'·'회사 주장'·'반대 근거'를 붙인다(verified_claims).
-  근거 id 가 없거나 회사 자체 사이트 근거뿐인 '제3자 확인', 근거 id 가 없는 '반대 근거'는 코드가 '회사 주장'으로 낮춘다.
+- 경쟁사는 분야 이름이 아니라 대상의 제품 유형으로 찾는다 (LLM 이 검색 계획을 세움).
+- 대상 기사 본문에 경쟁사로 언급된 회사는 코드로 뽑아 반드시 검토한다.
+- 이름이 근거에 없는 경쟁사는 버리고, 대상의 우위는 "회사 측 주장"으로만 쓴다.
+- 기술 요약의 차별점 주장마다 '제3자 확인'·'회사 주장'·'반대 근거'를 붙인다.
 """
 from __future__ import annotations
 
@@ -16,7 +13,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from agents.tech import candidate_line, evidence_blocks, judge_own
-from core.config import get_segment
+from core.config import get_config, get_segment
 from core.llm import structured
 from core.llm_bounded import bounded
 from core.prompts import render
@@ -25,13 +22,13 @@ from tools.sources import SourceRegistry
 from tools.web_search import web_search
 
 AGENT = "competition"
-MAX_QUERIES = 4  # 검색 계획 질의 상한 (+ "{회사} 경쟁사" 1건)
+MAX_QUERIES = 4  # 검색 계획 질의 상한
 
-RIVAL_TERMS = re.compile(r"경쟁|competitor|rival|대비|비교|점유율|market share", re.I)  # 본문 문단 고르기용
+RIVAL_TERMS = re.compile(r"경쟁|competitor|rival|대비|비교|점유율|market share", re.I)
 RIVAL = re.compile(r"경쟁\s?(?:사|업체|기업)|competitors?|rivals?", re.I)                  # 경쟁사를 말하는 문장
 _COUNTRY = "영국|미국|네덜란드|이스라엘|일본|중국|독일|프랑스|호주|스페인|벨기에|캐나다|이탈리아|덴마크|노르웨이|스웨덴|대만|싱가포르|인도"
 _NAME = r"[가-힣A-Za-z][가-힣A-Za-z0-9&\-]{1,20}"
-# 경쟁 문장 안의 회사 이름: "영국 더그투스", "더그투스 등 … 경쟁사", "경쟁사인 ○○", "competitors such as Tevel"
+# 경쟁 문장 안의 회사 이름
 MENTION = [re.compile(rf"(?:{_COUNTRY})의?\s(?P<name>{_NAME})"),
            re.compile(rf"(?<![가-힣A-Za-z])(?P<name>{_NAME})\s?등\s?[^.]{{0,30}}?경쟁\s?(?:사|업체|기업)"),
            re.compile(rf"경쟁\s?(?:사|업체|기업)(?:인|로는|으로는)\s(?P<name>{_NAME}(?:\s?,\s?{_NAME}){{0,4}})"),
@@ -41,14 +38,13 @@ LIST_SEP = re.compile(r"\s?,\s?|\s(?:and|or)\s")
 NOT_COMPANY = {"시장", "기업", "업체", "회사", "스타트업", "경쟁사", "경쟁", "제품", "기술", "정부", "농가", "농업", "외국", "해외",
                "국내", "업계", "로봇", "등", "대비", "비슷한", "유사한", "다른", "기존", "현지", "The", "Other", "Many",
                "진출", "수출", "작물", "딸기", "토마토", "오이", "파프리카", "과일", "채소", "서비스", "솔루션", "플랫폼", "대표",
-               "한국", "정부", "전시회", "박람회", "CES", "투자", "고객", "농장", "온실", "스마트팜"}
-# 이름 끝의 조사 (한글·영문 이름 모두: '테벨과', 'Tevel보다', '시장에')
+               "한국", "정부", "전시회", "박람회", "CES", "투자", "고객", *get_config().domain.non_company_words}
+# 이름 끝의 조사
 PARTICLE = re.compile(r"(?<=[가-힣A-Za-z]{2})(?:보다|에서|에게|으로|와|과|의|는|은|를|을|도|로|가|이|에)$")
-# 대상이 경쟁사보다 낫다는 단정 (검증 전에는 쓰지 않는다). '회사 측 주장:' 뒤의 말은 출처를 밝힌 것이라 허용.
-# '선도 기업'·'앞서 언급한' 같은 경쟁사 사실 서술은 단정이 아니므로 비교 표현만 잡는다
+# 대상이 경쟁사보다 낫다는 단정 ('회사 측 주장:' 뒤는 허용)
 SUPERIOR = re.compile(r"앞선다|앞서 있|앞서는|우위(?:에|를|가)|우월|뛰어나|능가|압도|더 낫|차별화된다|outperform|superior|ahead of",
                       re.I)
-CLAIMED = re.compile(r"회사\s?측\s?주장\s?[:：][^/\n.]*")  # 주장은 문장 끝('.')이나 '/' 까지
+CLAIMED = re.compile(r"회사\s?측\s?주장\s?[:：][^/\n.]*")
 CITE = re.compile(r"\[[WD][0-9a-f]{5,8}")
 
 
@@ -58,7 +54,7 @@ def _plain(s: str | None) -> str:
 
 
 def _asserts(text: str) -> bool:
-    """출처를 밝히지 않은 우열 단정이 있으면 True. '회사 측 주장: …' 부분(그 문장 끝까지)은 빼고 나머지만 본다."""
+    """출처를 밝히지 않은 우열 단정이 있으면 True."""
     return bool(SUPERIOR.search(CLAIMED.sub("", text or "")))
 
 
@@ -118,8 +114,7 @@ class CompetitionAnalysis(BaseModel):
 
 
 def _ground(res: CompetitionAnalysis, ids: list[str], reg: SourceRegistry, named: list[dict]) -> list[dict]:
-    """이름이 근거에 실제로 나오는 경쟁사만 남기고, 행마다 근거 id 를 맞춘다 (지어낸 경쟁사 차단).
-    LLM 이 근거 id 를 비우면 대상 기사 속 언급(named) → 나머지 근거 순으로 채운다."""
+    """이름이 근거에 실제로 나오는 경쟁사만 남기고 행마다 근거 id 를 맞춘다."""
     named_ids = {norm(m["name"]): m["evidence_ids"] for m in named}
     rows = []
     for c in res.competitors:
@@ -132,7 +127,7 @@ def _ground(res: CompetitionAnalysis, ids: list[str], reg: SourceRegistry, named
         row = {**c.model_dump(), "evidence_ids": ev}
         if _asserts(row["vs_target"]):
             row["vs_target"] = "회사 측 주장(제3자 비교 근거 없음): " + row["vs_target"]
-        if not CITE.search(row["vs_target"]):  # 표 칸에도 출처가 이어지게
+        if not CITE.search(row["vs_target"]):
             row["vs_target"] += f" [{', '.join(ev[:2])}]"
         rows.append(row)
     return rows
@@ -146,10 +141,7 @@ def _own_site(s: dict | None, keys: list[str]) -> bool:
 
 
 def verify_claims(items: list[VerifiedClaim], valid: set[str], reg: SourceRegistry, company: list[str]) -> list[dict]:
-    """주장 검증 결과를 코드로 점검한다. 근거 id 는 저장소에 있는 것만 남기고,
-    - '제3자 확인'인데 근거 id 가 없거나 회사 자체 사이트 근거뿐이면 → '회사 주장'
-    - '반대 근거'인데 근거 id 가 없으면 → '회사 주장'
-    낮춘 항목은 downgraded=True 로 표시한다."""
+    """근거가 부족한 '제3자 확인'·'반대 근거'를 '회사 주장'으로 낮춘다 (downgraded=True)."""
     keys = [norm(k) for k in company if k and len(norm(k)) >= 3]
     out = []
     for v in items:
@@ -180,11 +172,11 @@ def competition_node(state: dict) -> dict:
     seg = get_segment(c["segment_id"])
     name = c["official_name"]
     names = [name, c.get("name_en") or ""]
-    # 1) 대상 회사 근거 본문에 경쟁사로 직접 언급된 회사 (적격성 근거 + 창업자·기술 요약 근거 전체, v1 기술·팀 근거와 같은 범위)
+    # 1) 대상 회사 근거 본문에 경쟁사로 언급된 회사
     own = list(dict.fromkeys(c.get("evidence_ids", []) + state.get("founder", {}).get("pool_ids", [])
                              + tech.get("pool_ids", [])))
     named = mentioned_competitors(reg, own, names)
-    # 2) 검색 계획: 제품 유형을 정하고 그 유형의 경쟁사를 찾는 질의를 LLM 이 만든다
+    # 2) 검색 계획: 제품 유형과 경쟁사 검색 질의
     plan: SearchPlan = structured(SearchPlan).invoke(render(
         "competition_plan", name=name, segment=seg["name"], product=_plain(tech.get("product")),
         core_technology=_plain(tech.get("core_technology")),
@@ -206,7 +198,7 @@ def competition_node(state: dict) -> dict:
     res: CompetitionAnalysis = llm.invoke(render("competition", **ctx, feedback=""))
     bad = [x.name for x in res.competitors if _asserts(x.vs_target)] + (
         ["differentiation"] if _asserts(res.differentiation) else [])
-    if bad:  # 우열 단정이 있으면 한 번만 고쳐 쓰게 한다 (남으면 _ground 가 '회사 측 주장'으로 감싼다)
+    if bad:  # 우열 단정이 있으면 한 번만 고쳐 쓰게 한다
         res = llm.invoke(render("competition", **ctx, feedback=(
             f"다음 칸에 '앞선다·우위·뛰어나다' 같은 우열 단정이 있다: {', '.join(bad)}. "
             "경쟁사는 근거에 적힌 사실로, 대상의 강점은 '회사 측 주장: ~' 으로 고쳐 써라.")))

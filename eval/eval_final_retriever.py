@@ -8,8 +8,7 @@
 질문은 모두 한국어이고, ko/en 은 정답 문서의 언어다.
 
 비교표 구성: 선정 실험 때와 같은 표가 되도록 'final (hybrid)'·'dense only'·'hybrid a:b' 행은 선정 당시 런타임 설정
-(DECIDED = snowflake-arctic-ko + 하이브리드 0.3:0.7, '처음 선택')이고, KURE-v1 행이 대안이다. 행 이름은 설계서
-(docs/build_design._runtime_table)와 README(docs/build_readme._runtime)가 읽는다. 지금 config 의 임베딩·가중치와 같은 행은
+(DECIDED = snowflake-arctic-ko + 하이브리드 0.3:0.7, '처음 선택')이고, KURE-v1 행이 대안이다. 지금 config 의 임베딩·가중치와 같은 행은
 런타임 검색기(get_hybrid_retriever) 그대로 재고 runtime=true 를 붙인다(격자에 없으면 'runtime (hybrid)' 행을 더한다).
 
 질문 묶음: 표제 지표 'all'(과 ko/en·natural/keyword)은 기존 70문항이다. 코퍼스를 바꾸며 추가한 문항(질문 파일의 "added" 필드)은

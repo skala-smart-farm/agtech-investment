@@ -7,7 +7,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;600;700&display=swap">
 {# 보고서 view(agents/report.py): summary [(라벨, 문장)], chapters [{title, lead, blocks}], ref_groups.
    블록 종류: p(문단) · note(작은 규칙·설명 줄) · kv(굵은 라벨 목록) · ul(목록) · table(표) · h3(소제목) ·
-   cand(후보별 보류 사유 4줄) · box(ROI 참고치). density 0~3 은 5쪽을 넘을 때 조판 밀도를 올리는 단계다.
+   cand(후보별 보류 사유 4줄) · box(ROI 참고치). density 는 쪽수 상한을 넘을 때 조판 밀도를 올리는 단계다.
    양식: 학회지형 — 본문 명조, 제목·표 고딕, 3선 표, 표 번호 캡션(위), 색은 판정 표시에만 #}
 {% set fs = [9.8, 9.4, 9.0, 8.6][density] %}
 {% set lh = [1.62, 1.56, 1.5, 1.44][density] %}

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import inspect
-import re
 import subprocess
 import typing
 
@@ -11,9 +10,13 @@ import yaml
 
 from core.config import ROOT, get_config
 
-C1_KEYS = ["domain", "run_date", "registry", "discovery_rounds", "raw_candidates", "seen", "screened", "queue",
-           "current", "iterations", "founder", "tech", "market", "competition", "market_cache", "scorecard",
-           "decision", "evaluations", "end_reason", "report", "rag_traces", "log"]
+PAYLOAD = ["domain", "run_date", "registry", "raw_candidates", "screened", "current", "founder", "tech", "market",
+           "competition", "market_cache", "scorecard", "evaluations", "report"]
+CONTROL = ["discovery_rounds", "seen", "queue", "iterations", "decision", "supervisor_next", "supervisor_task",
+           "view_progress", "supervisor_reworks", "supervisor_steps", "supervisor_reviews", "supervisor_excluded",
+           "supervisor_final_review", "report_revisions", "report_evaluation", "end_reason"]
+TRACE = ["run_id", "last_error", "rag_traces", "log"]
+C1_KEYS = PAYLOAD + CONTROL + TRACE  # ① 페이로드 · ② 제어 · ③ 추적·복구 순서
 DISCOVERY_IN = {"domain", "run_date", "registry", "discovery_rounds", "seen", "queue", "iterations"}
 DISCOVERY_OUT = {"registry", "discovery_rounds", "raw_candidates", "seen", "screened", "queue", "current", "iterations",
                  "founder", "tech", "market", "competition", "scorecard", "end_reason", "rag_traces", "log"}
@@ -33,14 +36,6 @@ def test_state_keys_and_reducers():
     assert set(typing.get_type_hints(st.DiscoveryOut)) == DISCOVERY_OUT
     # 서브그래프 입력에 누적 키가 없어야 부모 Reducer 가 같은 기록을 두 번 붙이지 않는다
     assert not DISCOVERY_IN & {"screened", "log", "rag_traces", "evaluations"}
-
-
-def test_state_inline_comments_parsed_by_design_doc():
-    """설계서 State 표(docs/build_design._state_fields)와 같은 정규식으로 22키가 모두 읽혀야 한다."""
-    src = (ROOT / "graph" / "state.py").read_text(encoding="utf-8")
-    body = src[src.index("class InvestmentState"):]
-    names = [m.group(1) for m in re.finditer(r"^ {4}(\w+): ([^#\n]+?)[ \t]*#[ \t]*([^\n]+)$", body, re.M)]
-    assert names == C1_KEYS
 
 
 def test_v1_graph_still_compiles_with_new_state():

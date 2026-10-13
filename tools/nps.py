@@ -1,17 +1,8 @@
-"""국민연금 가입 사업장 내역(공공데이터포털, 로그인·키 불필요)으로 회사의 실재·창업 시기·인원을 확인한다.
+"""국민연금 가입 사업장 내역(공공데이터포털)으로 회사의 실재·창업 시기·인원을 확인한다.
 
-교수님 지적: 창업자 검색은 "창업 시기"와 다른 문제다. 이 데이터는 회사(사업장) 단위로
-- 적용일자: 사업장이 국민연금에 처음 가입한 날 → 첫 고용 시점, 창업 시기에 가까운 값
-- 가입자수: 지금 실제로 고용 중인 인원 (보도자료의 "직원 N명"을 제3자 자료로 교차 확인)
-- 가입상태: 1 등록 / 2 탈퇴 → 탈퇴면 폐업·휴업 가능성 (적격성 관문 G4 신호)
-- 신규취득자수·상실가입자수: 최근 달의 채용·퇴사 흐름
-을 준다. 3인 미만 법인은 목록에 없으므로 "못 찾음"은 탈락 사유가 아니다(보류 신호만).
-
-원본 CSV(약 115MB)는 저장소에 넣지 않고, 회사별 조회 결과만 스냅샷으로 남겨 재현한다.
-
-적격성 관문(agents/eligibility.py)이 후보 4곳을 스레드로 동시에 검사하므로 스냅샷 읽기·쓰기와 CSV 내려받기·적재는
-한 잠금 안에서 한다. 스냅샷은 임시 파일에 쓴 뒤 교체해(원자적 저장) 쓰는 도중의 파일을 다른 스레드가 읽지 않게 한다.
-예전 버전이 동시에 써서 깨진 스냅샷(JSONDecodeError: Extra data)은 앞의 온전한 JSON 을 살리고 원본은 백업한다.
+- 적용일자 ≈ 첫 고용 시점, 가입자수 = 현재 인원, 가입상태 탈퇴 = 폐업·휴업 가능성
+- 3인 미만 법인은 목록에 없으므로 "못 찾음"은 탈락 사유가 아니다
+- 원본 CSV(약 115MB)는 저장소에 넣지 않고 회사별 조회 결과만 스냅샷으로 남긴다
 """
 from __future__ import annotations
 
@@ -37,7 +28,7 @@ def _snapshot_file() -> Path:
     return path(f"{get_config().cache.dir}/snapshots/nps_lookup.json")
 
 
-_LOCK = threading.RLock()  # 스냅샷 읽기·쓰기와 CSV 내려받기·적재를 한 스레드씩 (적격성 관문이 4스레드로 부른다)
+_LOCK = threading.RLock()  # 적격성 관문이 여러 스레드로 부른다
 
 
 def _load_snapshot() -> dict:
@@ -48,7 +39,7 @@ def _load_snapshot() -> dict:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # 예전 버전의 동시 쓰기로 JSON 뒤에 다른 쓰기의 꼬리가 붙은 경우: 앞의 온전한 JSON 을 살린다
+        # 깨진 스냅샷이면 앞의 온전한 JSON 을 살린다
         backup = f.with_name(f"{f.stem}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}{f.suffix}")
         f.replace(backup)
         try:
@@ -62,7 +53,7 @@ def _load_snapshot() -> dict:
 
 
 def _save_snapshot(snap: dict) -> None:
-    """임시 파일에 다 쓴 뒤 한 번에 교체한다 — 다른 스레드·프로세스가 반쯤 쓴 파일을 읽지 않는다."""
+    """임시 파일에 쓴 뒤 교체한다 (원자적 저장)."""
     f = _snapshot_file()
     f.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=f.parent, prefix=f".{f.stem}.", suffix=".tmp")
@@ -83,7 +74,7 @@ def _csv_file() -> Path | None:
         return files[-1]
     if os.getenv("REPLAY_OFFLINE"):
         return None
-    import requests  # 최신 파일을 받는다 (약 40초)
+    import requests
 
     page = requests.get(PAGE, headers=UA, timeout=30).text
     m = re.search(r"fileDownload\.do\?atchFileId=(FILE_\d+)&fileDetailSn=(\d+)", page)
@@ -91,7 +82,7 @@ def _csv_file() -> Path | None:
         return None
     f = d / f"nps_{m.group(1)}.csv"
     url = f"https://www.data.go.kr/cmm/cmm/fileDownload.do?atchFileId={m.group(1)}&fileDetailSn={m.group(2)}"
-    tmp = f.with_suffix(".csv.part")  # 다 받은 뒤에만 이름을 바꿔, 받다 멈춘 파일을 원본으로 쓰지 않는다
+    tmp = f.with_suffix(".csv.part")
     tmp.write_bytes(requests.get(url, headers=UA, timeout=300).content)
     os.replace(tmp, f)
     return f
@@ -115,12 +106,12 @@ def _norm(name: str) -> str:
 
 
 def lookup(names: list[str]) -> dict:
-    """회사명(여러 표기)으로 사업장을 찾는다. 결과는 스냅샷에 남겨 재현 때 그대로 쓴다.
+    """회사명(여러 표기)으로 사업장을 찾는다.
     반환: {"status": matched|ambiguous|not_found|unavailable, "matches": [...], "ym": "YYYY-MM"}"""
     keys = [k for k in dict.fromkeys(_norm(n) for n in names if n) if len(k) >= 2]
     if not keys:
         return {"status": "not_found", "matches": [], "ym": ""}
-    with _LOCK:  # 읽기 → 조회 → 쓰기를 한 번에 (스레드끼리 서로의 결과를 덮어쓰지 않게)
+    with _LOCK:
         return _lookup_locked(keys)
 
 

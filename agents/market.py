@@ -1,12 +1,9 @@
-"""📊 시장성 평가 에이전트 (Scorecard '시장성 25%', 문항 M1~M4, Agentic RAG 의 주 사용처).
+"""시장성 평가 에이전트 (Scorecard 시장성 25%, 문항 M1~M4).
 
-  1) 질의 분해: LLM 이 세부 분야의 시장성 질문을 검색 가능한 하위 질문 3~6개로 나눈다 (v1 프롬프트·기본 질문 그대로).
-     투자 동향 하위 질문이 없으면 기본 투자 동향 질문 1개를 더한다 (투자 사이클 확인).
-  2) 하위 질문마다 Agentic RAG(answer_question): 문서 검색·웹 검색 중 어디서 찾을지는 RAG 서브그래프의 agent 노드가 고르고,
-     근거를 채점·재작성·웹 보완한 뒤 인용 달린 답을 만든다. 검색 없이 바로 답하는 경로는 끈다(수치 환각 방지).
-  3) 종합: 하위 답변과 근거로 시장 분석을 쓰고, 시장 규모 대표 수치를 구조화한다(size). 달러 환산(value_usd_m)은 코드가 한다.
-하위 질문 수(최대 6 + 투자 동향 1)와 서브그래프의 재작성·재생성 상한으로 반복 횟수를 제한한다.
-분해·하위 답변 기록은 rag_traces 에 남긴다. 같은 세부 분야는 분석을 한 번만 하고(market_cache) 시장성 판정만 후보마다 다시 한다.
+1) 세부 분야의 시장성 질문을 하위 질문 3~6개로 분해한다.
+2) 하위 질문마다 Agentic RAG(answer_question)로 인용 달린 답을 만든다.
+3) 하위 답변으로 시장 분석을 쓰고 시장 규모 수치를 구조화한다 (달러 환산은 코드).
+같은 세부 분야는 분석을 재사용하고(market_cache) 시장성 판정만 후보마다 다시 한다.
 """
 from __future__ import annotations
 
@@ -19,15 +16,11 @@ from core.config import get_config, get_segment, run_date
 from core.llm import structured
 from core.llm_bounded import bounded
 from core.prompts import render
-from rag import agentic_rag as rag  # answer_question·corpus_catalog 는 호출 시점에 찾는다
+from rag import agentic_rag as rag
 from tools.sources import SourceRegistry
 
 AGENT = "market"
 MIN_SUBQ, MAX_SUBQ = 3, 6
-# LLM 이 하위 질문을 3개 미만으로 내면 채우는 기본 질문 (분해 실패 대비)
-DEFAULT_SUBQ = [("국내 스마트농업·스마트팜 시장 규모 (기관별 추정치, 기준 연도)", "시장 규모"),
-                ("{seg} 글로벌 시장 규모와 연평균 성장률 (2024년 이후 발표)", "성장률"),
-                ("애그테크 벤처 투자 동향 ({prev}년 투자액 증감, 국가별 증감)", "투자 동향")]
 
 
 class SubQuestion(BaseModel):
@@ -65,7 +58,7 @@ class MarketAnalysis(BaseModel):
 
 
 def plan(seg: dict, date: str, catalog: str) -> tuple[str, list[SubQuestion], bool, bool]:
-    """큰 질문 → 하위 질문(최대 6개). 분해가 3개 미만이면 기본 질문으로 채우고, 투자 동향 질문이 없으면 1개 더한다.
+    """큰 질문 → 하위 질문(최대 6개). 투자 동향 질문이 없으면 1개 더한다.
     반환 (큰 질문, 하위 질문, 기본 질문으로 채웠는지, 투자 동향 질문을 더했는지)."""
     question = (f"{seg['name']} 분야 스타트업의 시장성: 국내·글로벌 시장 규모와 성장률, 수요 요인, 지불 의향, "
                 f"정책·규제, 도입 장벽, 최근 투자 동향")
@@ -73,14 +66,15 @@ def plan(seg: dict, date: str, catalog: str) -> tuple[str, list[SubQuestion], bo
         render("market_decompose", segment=seg["name"], question=question, run_date=date, catalog=catalog))
     subs = [s for s in dec.sub_questions if s.question.strip()][:MAX_SUBQ]
     padded = len(subs) < MIN_SUBQ
-    for q, purpose in DEFAULT_SUBQ:
+    defaults = [SubQuestion(question=d["question"].format(seg=seg["name"], prev=int(date[:4]) - 1), purpose=d["purpose"])
+                for d in get_config().domain.market_default_questions]
+    for d in defaults:
         if len(subs) >= MIN_SUBQ:
             break
-        subs.append(SubQuestion(question=q.format(seg=seg["name"], prev=int(date[:4]) - 1), purpose=purpose))
+        subs.append(d)
     added = not any("투자" in s.purpose for s in subs)
-    if added:  # 투자 사이클(최근 투자액 증감)은 시장 성장성 판단에 꼭 필요하다
-        q, purpose = DEFAULT_SUBQ[2]
-        subs.append(SubQuestion(question=q.format(prev=int(date[:4]) - 1), purpose=purpose))
+    if added:
+        subs.append(next(d for d in defaults if "투자" in d.purpose))
     return question, subs, padded, added
 
 
@@ -96,7 +90,7 @@ def to_usd_m(value: float | None, unit: str, fx_krw_per_usd: float) -> float | N
 
 
 def size_record(s: MarketSize, valid: set[str]) -> dict:
-    """구조화한 시장 규모 + 달러 환산값. 근거 id 가 저장소에 없으면 source_id·value_usd_m 을 None 으로 둔다(근거 없는 수치 환산 안 함)."""
+    """구조화한 시장 규모 + 달러 환산값. 근거 id 가 저장소에 없으면 환산하지 않는다."""
     d = s.model_dump()
     d["source_id"] = s.source_id if s.source_id in valid else None
     fx = get_config().roi.fx_krw_per_usd
@@ -105,7 +99,7 @@ def size_record(s: MarketSize, valid: set[str]) -> dict:
 
 
 def _analysis_text(c: dict, m: dict, tech: dict) -> str:
-    """시장성 판정에 넘기는 요약문. M3(경제적 효과)·M4(수익 모델)는 회사 문항이라 기술 요약의 제품·장점을 함께 넣는다."""
+    """시장성 판정에 넘기는 요약문 (M3·M4 용으로 제품·장점 포함)."""
     s = m.get("size") or {}
     size = (f"{s.get('raw')} ({s.get('scope')}, {s.get('year')}) [{s.get('source_id')}]" if s.get("source_id")
             else "근거 있는 대표 수치 없음")
@@ -124,7 +118,7 @@ def market_node(state: dict) -> dict:
     seg = get_segment(c["segment_id"])
     reg = SourceRegistry(state.get("registry"))
     cache = state.get("market_cache", {})
-    if seg["id"] in cache:  # 같은 세부 분야: 분석은 재사용하고, 시장성 판정은 이 후보 기준으로 다시 한다
+    if seg["id"] in cache:  # 같은 세부 분야는 분석 재사용
         out = dict(cache[seg["id"]])
         out["criterion"] = judge_own("market", state, reg, out["pool_ids"], _analysis_text(c, out, state.get("tech", {})))
         msg = (f"[시장성] {seg['name']}: 분석 캐시 재사용 → 시장성 YES {out['criterion']['yes']}/{out['criterion']['n']}")

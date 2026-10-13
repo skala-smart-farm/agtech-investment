@@ -1,15 +1,9 @@
-"""👤 창업자 평가 에이전트 (가이드 에이전트 정의(안)에 추가한 에이전트).
+"""창업자 평가 에이전트 (Scorecard 창업자 30%, 문항 F1~F4).
 
-Scorecard 에서 비중이 가장 큰 '창업자 (Owner) 30%' 를 혼자 맡는다 (1 에이전트 = 1 기준, 문항 F1~F4).
-창업 시점(t0)을 먼저 코드로 고정하고, 창업 **전** 전문성(F1·F2)과 창업 **후** 실행력(F3)을 나눠 본다.
-- t0 우선순위: TIPS 공개 목록 설립일(estDt) → 국민연금 사업장 최초 가입일(첫 고용) → 적격성 검증 단계의 설립연도
-  (같은 연도의 설립 표현이 근거에 있으면 그 근거 id 를 붙인다. 보고서 안에서 설립연도가 둘로 갈리지 않게 한다)
-  → 근거 속 가장 이른 설립 표현(근거 id) → 확인 불가. 어느 값을 썼는지 t0_source 에 남긴다.
-- 창업자는 인물 검색이 아니라 "회사가 알려진 기사·인터뷰 속 창업자 이력"으로 확인한다. 검색 쿼리 문자열은 v1 그대로다.
-- 검색 스니펫에는 창업자 이름·이력이 잘 안 나온다(예: CTO 이름이 기사 본문 1,300자 뒤에만 있음).
-  그래서 기사 본문에서 회사명·창업자 표현(대표, CTO, 창업 …) 주변 문단을 골라 스니펫과 함께 LLM 에 넘긴다.
-- 근거에 이름이 없는 인물, 날짜·근거 id 가 없는 마일스톤은 코드가 버린다. 인원(headcount)은 국민연금 가입자 수다.
-- RAG 미사용: 사람에 관한 사실은 PDF 코퍼스에 없다. 홈페이지 요약도 하지 않는다(기술 요약 에이전트만 한다).
+- 창업 시점(t0)을 코드로 먼저 정한다: TIPS 설립일 → 국민연금 최초 가입일 → 적격성 단계의 설립연도 → 근거 속 설립 표현.
+- 창업 전 전문성(F1·F2)과 창업 후 실행력(F3)을 나눠 본다.
+- 기사 본문에서 회사명·창업자 표현 주변 문단을 골라 LLM 에 넘긴다 (스니펫에는 이력이 잘 안 나옴).
+- 근거에 이름이 없는 인물, 날짜·근거 id 가 없는 마일스톤은 코드가 버린다.
 """
 from __future__ import annotations
 
@@ -22,6 +16,7 @@ from agents.tech import CITE_ID, candidate_line, evidence_blocks, judge_own
 from core.config import get_segment, run_date
 from core.llm_bounded import bounded
 from core.prompts import render
+from core.recency import recent_months
 from tools.fetch import enrich
 from tools.grounding import norm
 from tools.sources import SourceRegistry
@@ -32,8 +27,7 @@ AGENT = "founder"
 # 창업자·핵심 인력이 나오는 문단을 찾는 표현 ("대표적"은 제외)
 FOUNDER_TERMS = re.compile(r"대표(?!적)|CEO|CTO|공동\s?창업|창업자|창업|[Cc]o-?[Ff]ounder|[Ff]ounder|기술이사|연구소장")
 _TITLE = r"(?:대표이사|대표(?!적)|CEO|CTO|COO|공동창업자|창업자|기술이사|연구소장)"
-# 사람 이름(한글 3자) + 직함: "이규화 대표", "이규화(28) 메타파머스 대표", "(대표 이규화)", "대표자는 이원준입니다",
-# "윤원재 CTO", "Jane Doe, CEO". 회사명이 사이에 끼는 "이원준 조벡스 대표"는 _mentions 가 회사명으로 따로 찾는다
+# 사람 이름 + 직함: "이규화 대표", "(대표 이규화)", "Jane Doe, CEO"
 PERSON = re.compile(
     rf"(?<![가-힣])(?P<ko>[가-힣]{{3}})(?:\(\d{{2}}\) (?:[가-힣A-Za-z]{{2,12}} )?| ){_TITLE}"
     rf"|(?:대표이사|대표|CEO|CTO) (?P<ko2>[가-힣]{{3}})(?=[),])"
@@ -42,11 +36,10 @@ PERSON = re.compile(
     r"|(?:CEO|CTO|[Cc]o-?[Ff]ounder|[Ff]ounder)(?: and CEO)?,? (?P<en2>[A-Z][a-z]+ [A-Z][a-z]+)")
 # 직함 앞에 오지만 사람 이름이 아닌 말
 NOT_NAME = {"비롯한", "투자사", "관계자", "운영사", "스타트", "창업주", "공동의", "신임의"}
-# 창업자 이력 문단에 자주 나오는 말 (학력·경력) — 이름만 나열된 문단보다 이력 문단을 먼저 고르게 한다
+# 창업자 이력 문단에 자주 나오는 말 (학력·경력)
 BACKGROUND = re.compile(r"대학|학과|학부|박사|석사|전공|출신|경력|경험|근무|졸업|University|PhD|former", re.I)
 
-# 근거 속 설립 표현: "2022년 9월 설립", "설립일: 2020-04-17", "founded in 2019", "Founded: 2019"
-# ("2023년 창업도약패키지 선정", "창업자", "창업기업" 처럼 설립 사실이 아닌 말은 뺀다)
+# 근거 속 설립 표현: "2022년 9월 설립", "founded in 2019"
 _MONTHS = {m: i for i, m in enumerate(("january february march april may june july august september october "
                                        "november december").split(), 1)}
 _NOT_FOUNDING = r"(?!\s?예정|[가-힣]*(?:지원|사업|패키지|대회|경진|보육|교육|프로그램|센터|펀드|기업|도약|성장|진흥|자))"
@@ -56,7 +49,6 @@ FOUNDED = [
     re.compile(r"(?:설립|창업|창립)(?:일자?|연도|년도|연월일)?\s*[:：]?\s*(?P<y>(?:19|20)\d{2})(?:\s?[.\-/년]\s?(?P<m>\d{1,2}))?"),
     re.compile(r"(?P<y>(?:19|20)\d{2})\.(?P<m>\d{2})\s?설립"),                      # 기업 DB 표기 "2009.08설립"
     re.compile(r"(?:[Ff]ounded|[Ee]stablished)(?:\s?[:：])?\s(?:in\s)?(?:(?P<mn>[A-Z][a-z]+)\s)?(?P<y>(?:19|20)\d{2})"),
-    # "founded Upside Robotics in 2024" (회사명이 사이에 낀 표현, 이름 3단어까지)
     re.compile(r"[Ff]ounded\s(?:[A-Z][\w&.\-]*\s){1,3}in\s(?:(?P<mn>[A-Z][a-z]+)\s)?(?P<y>(?:19|20)\d{2})"),
 ]
 YEAR = re.compile(r"(?<!\d)((?:19[5-9]|20[0-4])\d)(?!\d)(?!\s?년생|생)")  # 이력 속 연도 (출생 연도 제외)
@@ -64,7 +56,7 @@ YM = re.compile(r"^((?:19|20)\d{2})-(\d{2})")
 
 
 def founder_queries(c: dict) -> list[tuple[str, bool]]:
-    """창업자·마일스톤 검색 쿼리 (쿼리, deep). v1 tech_node 쿼리 중 창업자·수상용이며 문자열은 v1 그대로다."""
+    """창업자·마일스톤 검색 쿼리 (쿼리, deep)."""
     name = c["official_name"]
     if c["region"] == "KR":
         return [(f"{name} 대표 창업자 이력 인터뷰", True), (f"{name} CTO 연구소장 기술 개발", False),
@@ -74,7 +66,7 @@ def founder_queries(c: dict) -> list[tuple[str, bool]]:
 
 
 def _mentions(text: str, companies: list[str] | None = None) -> list[re.Match]:
-    """이름+직함 표현. companies 가 있으면 "이원준 조벡스 대표", "조벡스 대표 이원준" 형태도 찾고, 회사명 자체(3자)는 뺀다."""
+    """이름+직함 표현 (회사명이 사이에 낀 형태 포함)."""
     companies = [c for c in companies or [] if c]
     pats = [PERSON] + [re.compile(rf"(?<![가-힣])(?P<ko>[가-힣]{{3}}) {re.escape(c)} {_TITLE}"
                                   rf"|{re.escape(c)} {_TITLE} (?P<ko2>[가-힣]{{3}})(?=(?:는|은|이|가|의)?(?![가-힣]))")
@@ -95,8 +87,7 @@ def person_mentions(text: str, companies: list[str] | None = None) -> list[str]:
 
 
 def _leader_hints(blocks: dict[str, str], keys: list[str], ceo: str | None, limit: int = 8) -> list[str]:
-    """회사명이 나오는 근거 안의 '이름 + 직함' 표현. 프로필 대표자 → 회사명 바로 옆(±80자) → 나머지 순으로 고른다
-    (같은 기사에 나온 투자사 대표 같은 다른 회사 사람이 앞에 오지 않게)."""
+    """회사명이 나오는 근거 안의 '이름 + 직함' 표현 (회사명 가까운 것부터)."""
     nk = [norm(k) for k in keys if k and len(norm(k)) >= 2]
     ck = norm(ceo or "")
     ranked = []
@@ -114,7 +105,7 @@ def _leader_hints(blocks: dict[str, str], keys: list[str], ceo: str | None, limi
 
 
 def _ground_founders(people: list, blocks: dict[str, str]) -> list[dict]:
-    """근거 텍스트에 이름이 실제로 있는 인물만 남기고, evidence_ids 는 그 이름이 나오는 근거로 맞춘다 (지어낸 인물 차단)."""
+    """근거 텍스트에 이름이 실제로 있는 인물만 남긴다."""
     out = []
     for f in people:
         key = norm(re.split(r"[(/]", f.name)[0])
@@ -127,7 +118,7 @@ def _ground_founders(people: list, blocks: dict[str, str]) -> list[dict]:
 
 
 def _to_date(s: str | None) -> date | None:
-    """'YYYY-MM-DD' / 'YYYY-MM' / 'YYYY' → date. 월·일이 없으면 1일·1월로 본다 (경과 연수를 가장 길게 잡는 쪽)."""
+    """'YYYY-MM-DD' / 'YYYY-MM' / 'YYYY' → date (월·일이 없으면 1월 1일)."""
     m = re.match(r"^((?:19|20)\d{2})(?:-(\d{1,2}))?(?:-(\d{1,2}))?", s or "")
     if not m:
         return None
@@ -138,8 +129,7 @@ def _to_date(s: str | None) -> date | None:
 
 
 def founding_mentions(reg: SourceRegistry, ids: list[str], keys: list[str], until: str) -> list[dict]:
-    """근거 본문 속 설립 표현 중 회사명이 바로 옆(앞 80자·뒤 40자)에 있는 것 → [{date, evidence_id, quote}], 이른 날짜 순.
-    until(평가 기준일)보다 뒤의 연도는 버린다."""
+    """회사명 옆에 있는 설립 표현 → [{date, evidence_id, quote}], 이른 날짜 순."""
     nk = [norm(k) for k in keys if k and len(norm(k)) >= 2]
     out = []
     for sid in dict.fromkeys(ids):
@@ -170,7 +160,7 @@ def pick_t0(c: dict, reg: SourceRegistry, ids: list[str], keys: list[str], until
     found = founding_mentions(reg, ids, keys, until)
     if c.get("founded_year"):
         y = str(c["founded_year"])
-        same = next((f for f in found if f["date"][:4] == y), None)   # 설립 표현은 근거를 붙이는 데만 쓴다
+        same = next((f for f in found if f["date"][:4] == y), None)
         if same:
             return {"t0": y, "t0_basis": "적격성 검증 설립연도", "t0_evidence_ids": [same["evidence_id"]],
                     "t0_source": f"적격성 검증 단계의 설립연도, 원문 \"{same['quote'].strip()}\" [{same['evidence_id']}]"}
@@ -184,8 +174,7 @@ def pick_t0(c: dict, reg: SourceRegistry, ids: list[str], keys: list[str], until
 
 
 def _before_t0(background: str, llm_value: bool | None, t0: date | None) -> bool | None:
-    """창업 전 경력 여부. t0 를 모르면 None. 이력에 t0 연도보다 이른 연도가 있으면 True, 없으면 LLM 판단을 따른다
-    (연도 없이 '창업 전 ○○ 근무'처럼 적힌 이력은 LLM 만 읽을 수 있다)."""
+    """창업 전 경력 여부. 이력에 t0 보다 이른 연도가 있으면 True, 없으면 LLM 판단. t0 를 모르면 None."""
     if t0 is None:
         return None
     years = [int(y) for y in YEAR.findall(CITE_ID.sub("", background or ""))]
@@ -202,8 +191,7 @@ def _dated_ids(m: dict, valid: set[str], reg: SourceRegistry) -> list[str]:
 
 
 def clean_milestones(items: list, valid: set[str], reg: SourceRegistry, until: str) -> list[dict]:
-    """날짜('YYYY-MM')와 그 연도가 확인되는 근거 id 가 있는 마일스톤만 남긴다. 기준일보다 뒤(예정)는 버린다.
-    같은 날짜·같은 사건(공백·기호 무시)은 하나로 합친다. 날짜 순."""
+    """날짜와 근거 id 가 확인되는 마일스톤만 남기고 중복을 합친다 (기준일 이후는 버림)."""
     out: dict[tuple[str, str], dict] = {}
     for x in items:
         m = YM.match(x.date.strip())
@@ -267,7 +255,7 @@ def _analysis_text(c: dict, f: dict) -> str:
         f"[창업 시점 t0] {f['t0'] or '확인 불가'} — {f['t0_source']}{years}",
         f"[팀] {f['team_assessment']}",
         f"[창업자·핵심 인력] {people or '확인 불가'}",
-        f"[마일스톤] {stones or '없음'} (최근 24개월 {f['milestones_24m']}건)",
+        f"[마일스톤] {stones or '없음'} (최근 {recent_months()}개월 {f['milestones_recent']}건)",
         f"[고용] {_nps_line(c.get('nps') or {})}",
     ])
 
@@ -280,7 +268,7 @@ def founder_node(state: dict) -> dict:
         't0': str|None, 't0_basis': str, 't0_source': str, 't0_evidence_ids': [...],   # 창업 시점과 그 근거
         'years_since_t0': float|None,                                           # t0 → 평가 기준일 경과 연수
         'people': [{'name','role','background','before_t0': bool|None,'evidence_ids'}],
-        'milestones': [{'date': 'YYYY-MM','what','evidence_ids'}], 'milestones_24m': int,
+        'milestones': [{'date': 'YYYY-MM','what','evidence_ids'}], 'milestones_recent': int,
         'headcount': int|None, 'hires_per_year': float|None, 'team_assessment': str,
         'evidence_ids': [...], 'pool_ids': [...],                               # pool_ids: 판정에 쓰는 근거 id
         'criterion': DimResult,                                                 # core.judge.judge_dimension('founder', …)
@@ -293,7 +281,7 @@ def founder_node(state: dict) -> dict:
     ids = list(c.get("evidence_ids", []))
     for query, deep in founder_queries(c):
         ids += web_search(query, reg, AGENT, topic="news", recent=False, deep=deep, raw=True)
-    # 인터뷰·기사 원문을 받아 창업자 이력처럼 스니펫에 없는 사실을 보강 (키 불필요)
+    # 기사 원문으로 창업자 이력 보강
     enrich(reg, ids, [norm(name), norm(c.get("name_en") or "")], limit=8)
     ids = list(dict.fromkeys(ids))
     names = [name, c.get("name_en") or ""]
@@ -302,7 +290,7 @@ def founder_node(state: dict) -> dict:
     t0_date = _to_date(t0["t0"])
     years = round((_to_date(until) - t0_date).days / 365.25, 1) if t0_date and _to_date(until) else None
 
-    # 스니펫 + 본문 속 회사명·창업자 문단 (창업자 이름·이력은 대개 본문에만 있다)
+    # 스니펫 + 본문 속 창업자 문단
     blocks = evidence_blocks(reg, ids, names, terms=FOUNDER_TERMS, boost=BACKGROUND, person=PERSON)
     ceo = c.get("ceo")
     nps = c.get("nps") or {}
@@ -313,7 +301,7 @@ def founder_node(state: dict) -> dict:
     res: FounderAnalysis = llm.invoke(render("founder", **ctx, feedback=""))
     hints = _leader_hints(blocks, names, ceo)
     retried = False
-    # 근거에 '이름 + 대표' 같은 표현이 있는데 (근거로 확인되는) 인물이 비었으면 한 번만 다시 묻는다
+    # 근거에 '이름 + 직함'이 있는데 인물이 비었으면 한 번만 다시 묻는다
     if not _ground_founders(res.people, blocks) and hints:
         retried = True
         feedback = ("직전 답의 people 이 비어 있다. 근거에 다음 인물 표현이 있다: " + "; ".join(hints)
@@ -326,7 +314,7 @@ def founder_node(state: dict) -> dict:
     for p in people:
         p["before_t0"] = _before_t0(p["background"], p["before_t0"], t0_date)
     ck = norm(ceo or "")
-    if not people and len(ck) >= 2:  # 그래도 비었으면 공공 데이터(TIPS)의 대표자를 근거와 함께 넣는다
+    if not people and len(ck) >= 2:  # 그래도 비었으면 TIPS 대표자
         found = [sid for sid, t in blocks.items() if ck in norm(t)]
         if found:
             people = [{"name": ceo, "role": "대표", "background": "확인 불가 (TIPS 공개 목록의 대표자)",
@@ -335,7 +323,7 @@ def founder_node(state: dict) -> dict:
     headcount = nps.get("members") if nps.get("status") == "matched" else None
     out = {
         **t0, "years_since_t0": years, "people": people, "milestones": milestones,
-        "milestones_24m": sum(0 <= months_between(m["date"], until) <= 24 for m in milestones),
+        "milestones_recent": sum(0 <= months_between(m["date"], until) <= recent_months() for m in milestones),
         "headcount": headcount,
         "hires_per_year": round(headcount / max(years, 0.5), 1) if headcount is not None and years is not None else None,
         "team_assessment": res.team_assessment,
@@ -348,7 +336,7 @@ def founder_node(state: dict) -> dict:
     crit = out["criterion"]
     who = ", ".join(f"{p['name']}({p['role']})" for p in people) or "없음"
     msg = (f"[창업자] {name}: t0 {out['t0'] or '확인 불가'}({t0['t0_basis']}), 인물 {len(people)}명({who})"
-           f"{' — 재시도' if retried else ''}, 마일스톤 {len(milestones)}건(최근 24개월 {out['milestones_24m']}건), "
+           f"{' — 재시도' if retried else ''}, 마일스톤 {len(milestones)}건(최근 {recent_months()}개월 {out['milestones_recent']}건), "
            f"근거 {len(out['evidence_ids'])}건 → 창업자 YES {crit['yes']}/{crit['n']}")
     print(msg)
     return {"registry": reg.data, "founder": out, "log": [msg]}

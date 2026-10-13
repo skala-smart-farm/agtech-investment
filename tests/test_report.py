@@ -16,6 +16,7 @@ import pytest
 
 import agents.report as R
 import tools.web_search as WS
+from core.config import get_config
 from tools.sources import ACCESS_DATE_NOTE, REFERENCE_FORMATS, SourceRegistry, format_reference, uses_access_date
 
 FIX = Path(__file__).parent / "fixtures"
@@ -194,7 +195,8 @@ def test_invest_report_structure(run, can_render):
     assert "Pre-A·Series A 혼합, 국내 7·해외 3의 근사 기준" in ch4 or "혼합, 국내" in ch4  # 기준 집단은 근사임을 밝힌다
     assert rep["submit_pdf"] and Path(rep["submit_pdf"]).exists()
     if can_render:
-        assert rep["pages"] <= 5 and rep["summary_ratio"] <= 0.5, (rep["pages"], rep["summary_ratio"])
+        lim = get_config().report
+        assert rep["pages"] <= lim.max_pages and rep["summary_ratio"] <= lim.summary_max_ratio, (rep["pages"], rep["summary_ratio"])
 
 
 def test_invest_scenario_skips_submission_file(run, set_cfg):
@@ -294,7 +296,9 @@ def test_hold_report_structure(run, can_render):
         assert ck[key] is True, (key, ck)
     assert ck["banned_hits"] == [] and ck["consistency_violations"] == []
     if can_render:
-        assert rep["pages"] <= 5 and rep["summary_ratio"] <= 0.5, (rep["pages"], rep["summary_ratio"], ck["density_level"])
+        lim = get_config().report
+        assert rep["pages"] <= lim.max_pages and rep["summary_ratio"] <= lim.summary_max_ratio, (
+            rep["pages"], rep["summary_ratio"], ck["density_level"])
 
 
 def test_hold_candidate_claims_checked_per_candidate(run):

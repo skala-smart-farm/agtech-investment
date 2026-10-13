@@ -1,12 +1,9 @@
-"""🗜️ 기술 요약 에이전트 (Scorecard '제품/기술력 15%', 문항 P1~P4).
+"""기술 요약 에이전트 (Scorecard 제품/기술력 15%, 문항 P1~P4).
 
-가이드: "홈페이지, 논문 등에서 핵심 기술, 장단점 정보 확인". 창업자·팀은 👤 창업자 평가 에이전트(agents/founder.py)가 맡는다.
-- 회사 고유 정보(제품, 핵심 기술, 특허, 실증, 판매·계약)는 웹 근거로 모은다. 검색 쿼리 문자열은 v1 그대로다(검색 캐시 재사용).
-- 홈페이지 요약: 문서 요약 도구(summarize_document)를 코드가 직접 부른다. 홈페이지를 못 읽으면 이미 모은 회사 기사 본문 1건을 요약한다.
-- 기술 수준 비교의 기준선(해당 분야 기술 동향·상용화 수준)은 문서 코퍼스에서 Agentic RAG(answer_question)로 가져온다.
-- 결과: 장점(pros)·단점(cons)·회사 측 차별점 주장(claims, 경쟁사 비교 에이전트가 검증)과 제품/기술력 기준 판정(criterion).
-
-이 모듈의 evidence_blocks(본문 발췌 body_passages 포함)·CITE_ID·candidate_line·judge_own 은 다른 분석 에이전트도 쓴다.
+- 제품·핵심 기술·특허·실증·판매 근거를 웹에서 모으고, 홈페이지(못 읽으면 회사 기사)를 요약한다.
+- 분야 기술 기준선은 문서 코퍼스에서 Agentic RAG 로 가져온다.
+- 결과: 장점·단점·차별점 주장(claims, 경쟁사 에이전트가 검증)과 제품/기술력 판정.
+evidence_blocks·CITE_ID·candidate_line·judge_own 은 다른 분석 에이전트도 쓴다.
 """
 from __future__ import annotations
 
@@ -16,10 +13,10 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from core import judge
-from core.config import get_segment, run_date
+from core.config import get_config, get_segment, run_date
 from core.llm_bounded import bounded
 from core.prompts import render
-from rag import agentic_rag as rag  # 함수는 호출 시점에 찾는다(병합 순서와 무관하게 import 되고, 테스트에서 바꿔 끼우기 쉽게)
+from rag import agentic_rag as rag
 from rag.index import get_chunks
 from tools import agent_tools, channels
 from tools.fetch import enrich
@@ -30,24 +27,20 @@ from tools.web_search import web_search
 
 AGENT = "tech"
 
-# 기사 본문에서 기술·제품·실적 문단을 고르는 표현 (본문 발췌용)
+# 기사 본문에서 기술·제품·실적 문단을 고르는 표현
 TECH_TERMS = re.compile(r"기술|특허|제품|개발|실증|상용|출시|설치|도입|농가|매출|고객|계약|협약|공급|수출|정확도|절감|수확량|"
                         r"AI|인공지능|로봇|센서|patent|product|deploy|customer|revenue|trial|yield", re.I)
 CITE_ID = re.compile(r"\b[WD][0-9a-f]{5,8}\b")
-BASELINE_Q = "{seg} 분야의 기술 동향, 상용화 수준, 기술적 과제"   # v1 과 같은 질문 (RAG 캐시 키)
+BASELINE_Q = "{seg} 분야의 기술 동향, 상용화 수준, 기술적 과제"
 BASELINE_PURPOSE = "스타트업 기술 수준을 비교할 기준선"
 HOMEPAGE_FOCUS = "핵심 기술·제품·장점과 단점"
 
 
 def tech_queries(c: dict) -> list[tuple[str, bool]]:
-    """기술·제품 검색 쿼리 (쿼리, deep). v1 tech_node 쿼리 중 창업자용을 뺀 나머지이며 문자열은 v1 그대로다."""
-    name = c["official_name"]
-    if c["region"] == "KR":
-        return [(f"{name} 특허 등록 기술", False), (f"{name} 실증 농가 효과 수확량 절감", True),
-                (f"{name} 매출 고객 농가 수 설치", True), (f"{name} 협약 계약 공급 농협 지자체 수출", False)]
-    q = c.get("name_en") or name
-    return [(f"{q} patent", False), (f"{q} field trial results yield savings", True),
-            (f"{q} revenue customers farms deployed", True), (f"{q} partnership contract distribution", False)]
+    """기술·제품 검색 쿼리 (쿼리, deep)."""
+    kr = c["region"] == "KR"
+    name = c["official_name"] if kr else (c.get("name_en") or c["official_name"])
+    return [(t["query"].format(name=name), t["deep"]) for t in get_config().domain.tech_queries["ko" if kr else "en"]]
 
 
 def _covered(passage: str, skip: str) -> bool:
@@ -119,13 +112,13 @@ def cited(items: list[str], valid: set[str]) -> list[str]:
 
 
 def candidate_line(c: dict) -> str:
-    """판정 LLM 에 넘기는 요약문 첫 줄: 후보 기본 정보 (v1 투자 판단 요약문의 [후보] 줄과 같은 형식)."""
+    """판정 LLM 에 넘기는 요약문 첫 줄: 후보 기본 정보."""
     return (f"[후보] {c['official_name']} | 단계 {c.get('stage')} ({c.get('round_date') or '시점 미상'}, "
             f"{c.get('round_amount') or '금액 미상'}) | 설립 {c.get('founded_year') or '확인 불가'} | {c.get('one_line')}")
 
 
 def judge_own(dim: str, state: dict, reg: SourceRegistry, pool_ids: list[str], analysis: str) -> dict:
-    """에이전트가 맡은 Scorecard 기준(dim)을 core.judge 로 판정한다 (계약 C3).
+    """에이전트가 맡은 Scorecard 기준(dim)을 core.judge 로 판정한다.
     근거 풀 = 지금까지 모인 근거(current·앞 에이전트의 pool_ids) + 이 에이전트가 모은 근거.
     이 노드에서 새로 등록한 근거도 풀에 들어가도록 state 의 registry 대신 지금의 reg 로 거른다."""
     pool = judge.evidence_pool({**state, "registry": reg.data}, pool_ids)
@@ -133,7 +126,7 @@ def judge_own(dim: str, state: dict, reg: SourceRegistry, pool_ids: list[str], a
 
 
 def homepage_url(c: dict, reg: SourceRegistry, ids: list[str]) -> str | None:
-    """회사 홈페이지 주소: TIPS 공개 목록(국내)의 홈페이지 → 호스트에 회사 영문명·이름이 들어간 웹 근거 URL → 없으면 None."""
+    """회사 홈페이지 주소: TIPS 목록 → 회사 이름이 호스트에 들어간 웹 근거 URL → None."""
     if c.get("region") == "KR":
         names = {normalize(x) for x in (c.get("name"), c.get("official_name")) if x}
         for r in channels.tips_agtech(min_year=0):
@@ -173,7 +166,7 @@ def summarize_company(c: dict, reg: SourceRegistry, ids: list[str], keys: list[s
         if sid and (text := summarize.invoke({"source": sid, "focus": HOMEPAGE_FOCUS})):
             return text, sid, "홈페이지 " + ("읽기 실패" if url else "주소 없음") + " → 회사 기사 요약"
         return None, None, "요약 없음"
-    except Exception as e:  # 요약은 선택 단계: 도구 오류로 분석 전체를 멈추지 않는다
+    except Exception as e:  # 요약 실패로 분석을 멈추지 않는다
         return None, None, f"요약 실패({type(e).__name__})"
 
 
@@ -216,20 +209,20 @@ def tech_node(state: dict) -> dict:
     name = c["official_name"]
     seg = get_segment(c["segment_id"])
     ids = list(c.get("evidence_ids", []))
-    # 평가표 제품/기술력·경쟁 문항에 필요한 근거를 겨냥한 검색 (특허·실증·판매·파트너)
+    # 특허·실증·판매·파트너 검색
     for query, deep in tech_queries(c):
         ids += web_search(query, reg, AGENT, topic="news", recent=False, deep=deep, raw=True)
-    # 회사 기사 원문을 받아 실적·계약처럼 스니펫에 없는 사실을 보강 (키 불필요)
+    # 기사 원문으로 스니펫에 없는 사실 보강
     enrich(reg, ids, [norm(name), norm(c.get("name_en") or "")], limit=12)
-    # 코퍼스(공공 문서)에서 회사 이름이 직접 나오는 조각 (예: 정부 우수기업 선정 목록) → 날짜 있는 제3자 근거
+    # 코퍼스에서 회사 이름이 나오는 조각 (제3자 근거)
     keys = [k for k in (norm(name), norm(c.get("name_en") or "")) if len(k) >= 2]
     for ch in get_chunks():
         if any(k in norm(ch.page_content) for k in keys):
             ids.append(reg.add_doc(ch.metadata, ch.page_content, agent=AGENT, query=f"코퍼스 속 {name}"))
-    # 분야 기술 기준선: Agentic RAG (검색 없이 바로 답하는 경로는 끈다 — 수치 환각 방지)
+    # 분야 기술 기준선 (Agentic RAG)
     base = rag.answer_question(BASELINE_Q.format(seg=seg["name"]), BASELINE_PURPOSE, reg, AGENT, allow_direct=False)
     ids += base["evidence_ids"]
-    # 홈페이지(없거나 못 읽으면 회사 기사) 요약: 끝에 붙은 [근거 id] 를 근거 목록에 더한다
+    # 홈페이지 요약
     summary, summary_src, summary_note = summarize_company(c, reg, ids, keys)
     if summary:
         ids += [i for i in CITE_ID.findall(summary) if reg.get(i)]
@@ -243,7 +236,7 @@ def tech_node(state: dict) -> dict:
 
     valid = set(ids)
     out = res.model_dump()
-    # 근거 id 가 달린 성장 신호·차별점 주장만 남긴다 (주장은 경쟁사 비교 에이전트가 검증)
+    # 근거 id 가 달린 항목만 남긴다
     out["growth_signals"] = cited(res.growth_signals, valid)
     out["claims"] = cited(res.claims, valid)
     refs = (list(res.evidence_ids) + [i for x in out["growth_signals"] + out["claims"] + res.pros + res.cons
