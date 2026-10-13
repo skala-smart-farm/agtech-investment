@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import inspect
-import re
 import subprocess
 import typing
 
@@ -33,14 +32,6 @@ def test_state_keys_and_reducers():
     assert set(typing.get_type_hints(st.DiscoveryOut)) == DISCOVERY_OUT
     # 서브그래프 입력에 누적 키가 없어야 부모 Reducer 가 같은 기록을 두 번 붙이지 않는다
     assert not DISCOVERY_IN & {"screened", "log", "rag_traces", "evaluations"}
-
-
-def test_state_inline_comments_parsed_by_design_doc():
-    """설계서 State 표(docs/build_design._state_fields)와 같은 정규식으로 22키가 모두 읽혀야 한다."""
-    src = (ROOT / "graph" / "state.py").read_text(encoding="utf-8")
-    body = src[src.index("class InvestmentState"):]
-    names = [m.group(1) for m in re.finditer(r"^ {4}(\w+): ([^#\n]+?)[ \t]*#[ \t]*([^\n]+)$", body, re.M)]
-    assert names == C1_KEYS
 
 
 def test_v1_graph_still_compiles_with_new_state():

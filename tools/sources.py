@@ -1,8 +1,4 @@
-"""근거(Evidence) 레지스트리와 REFERENCE 표기.
-
-모든 에이전트가 모은 근거는 id(D=문서, W=웹)로 등록되고, 분석 결과는 이 id 로만 근거를 인용한다.
-보고서 REFERENCE 에는 최종 본문에 실제로 인용된 id 만 들어간다(과제 조건: 실제 활용 자료만).
-"""
+"""근거 저장소와 REFERENCE 표기. 근거는 id(D=문서, W=웹)로 등록하고, 분석 결과는 이 id 로만 인용한다."""
 from __future__ import annotations
 
 import hashlib
@@ -50,12 +46,11 @@ SITE_TAIL = re.compile(r"(news|korea|\.com|\.kr|일보|신문|뉴스|경제|inno
 
 def _clean_title(title: str, site: str) -> str:
     title = title.strip()
-    for sep in (" - ", " | ", " : ", " – "):  # 먼저 "제목 - 사이트명" 꼬리를 떼고
+    for sep in (" - ", " | ", " : ", " – "):
         if sep in title:
             tail = title.rsplit(sep, 1)[-1].strip()
             if tail == site or (len(tail) <= 28 and SITE_TAIL.search(tail)):
                 title = title.rsplit(sep, 1)[0].strip()
-    # 다음으로 "< 산업 < 기사본문" 같은 게시판 경로 꼬리를 뗀다
     return re.sub(r"(\s*<\s*[^<>]{1,20})+\s*<\s*기사본문\s*$", "", title).strip()
 
 
@@ -71,8 +66,7 @@ def _date(raw: str | None) -> str | None:
 
 
 def _date_from(url: str, text: str) -> str | None:
-    """게시일이 없을 때 URL(/2022/12/10/, /20221210) 이나 본문(2022.12.10)에서 날짜를 찾는다.
-    설립일("설립일 2022-09-02", "2022년 9월 2일 설립")은 게시일이 아니므로 건너뛴다."""
+    """게시일이 없을 때 URL 이나 본문에서 날짜를 찾는다 (설립일은 건너뛴다)."""
     for pat in (r"/(20\d{2})/(\d{2})/(\d{2})(?:/|\b)", r"/(20\d{2})(\d{2})(\d{2})\d*", r"[?&]date=(20\d{2})-?(\d{2})-?(\d{2})"):
         m = re.search(pat, url or "")
         if m and 1 <= int(m.group(2)) <= 12 and 1 <= int(m.group(3)) <= 31:
@@ -81,7 +75,7 @@ def _date_from(url: str, text: str) -> str | None:
     for pat in (r"(?:입력|등록|게재|승인|발행|기사입력|Published|Posted)\s*[:：]?\s*(20\d{2})[.\-/년 ]+\s?(\d{1,2})[.\-/월 ]+\s?(\d{1,2})",
                 r"(20\d{2})\s?년\s?(\d{1,2})\s?월\s?(\d{1,2})\s?일",
                 r"(20\d{2})[.-]\s?(\d{1,2})[.-]\s?(\d{1,2})"):
-        for m in re.finditer(pat, head):  # "설립일 2022-09-02", "설립연월일: …", "2022년 9월 2일 설립" 은 건너뛴다
+        for m in re.finditer(pat, head):
             if (re.search(r"(?:설립|창립|창업|Founded)(?:일자?|연월일|년월일)?\s*[:：]?\s*$", head[max(0, m.start() - 12): m.start()])
                     or re.match(r"\s*(?:[-–]\s*)?(?:에\s*)?(?:설립|창립)(?!일|연월일)", head[m.end(): m.end() + 10])):
                 continue
@@ -109,13 +103,10 @@ class SourceRegistry:
 
     @staticmethod
     def _id(prefix: str, key: str) -> str:
-        # 병렬 노드가 동시에 등록해도 충돌하지 않도록 순번 대신 키 해시로 id 를 만든다
         return prefix + hashlib.sha1(key.encode()).hexdigest()[:5]
 
     def _new_id(self, prefix: str, key: str) -> str:
-        """새 근거의 id. 보통은 _id(해시 앞 5자리)와 같다. 이미 다른 출처가 그 id 를 쓰고 있으면(해시 충돌)
-        해시를 한 자리씩 늘려 겹치지 않는 id 를 준다 — 먼저 등록된 근거를 덮어쓰지 않는다.
-        충돌이 없으면 id 가 예전과 같으므로 재현용 캐시(프롬프트 속 근거 id)도 그대로 맞는다."""
+        """새 근거의 id (해시 앞 5자리, 충돌하면 한 자리씩 늘린다)."""
         full = hashlib.sha1(key.encode()).hexdigest()
         for n in range(5, len(full) + 1):
             sid = prefix + full[:n]
@@ -130,7 +121,7 @@ class SourceRegistry:
         url = result.get("url", "")
         key = key or "web:" + url
         if sid := self._find(key):
-            if result.get("raw_content") and not self.data[sid].get("body"):  # 같은 URL 을 본문과 함께 다시 받은 경우
+            if result.get("raw_content") and not self.data[sid].get("body"):
                 self.data[sid]["body"] = re.sub(r"\s+", " ", result["raw_content"])[:6000]
                 if not self.data[sid]["date"] and (d := _date_from("", result["raw_content"])):
                     self.data[sid].update(date=d, date_is_access=False)
@@ -179,7 +170,7 @@ class SourceRegistry:
             if not s:
                 continue
             if s["kind"] == "web":
-                when = s["date"] or "게시일 미상"  # 조회일을 보여 주면 LLM 이 사건 날짜로 오인한다
+                when = s["date"] or "게시일 미상"
                 head = f"[{sid}] (웹, {s['site']}, {when}) {s['title']}"
             else:
                 head = f"[{sid}] (문서, {s['publisher']} {s['year']}, p.{s['page']}) {s['title']}"
@@ -188,13 +179,13 @@ class SourceRegistry:
 
 
 # ── REFERENCE 표기 보정
-# 포털 전재본: 원 매체·기자를 본문("Copyright ⓒ 조선비즈", "최효정 기자")에서 찾아 표기한다 (URL 은 그대로)
+# 포털 전재본: 원 매체·기자를 본문에서 찾아 표기한다
 PORTALS = ("v.daum.net", "news.daum.net", "n.news.naver.com", "news.naver.com", "news.nate.com")
-# 뉴스레터·모음 메일: 여러 기사를 한데 모은 2차 자료라 인용하지 않는다
+# 뉴스레터·모음 메일은 인용하지 않는다
 NEWSLETTERS = ("stibee.com", "maily.so")
 # 목록·DB 페이지: 게시일이 없어 조회일로 표기하고, 기관명은 운영 주체로 쓴다
 LIST_PAGES = {"jointips.or.kr": "중소벤처기업부 TIPS", "data.go.kr": "국민연금공단"}
-GROUPS = ("기관 보고서", "학술 논문", "웹페이지")  # REFERENCE 소제목과 번호 순서
+GROUPS = ("기관 보고서", "학술 논문", "웹페이지")
 TRUNCATED = re.compile(r"\s*(?:\.{3,}|…)\s*$")
 _PORTAL_OWN = re.compile(r"nate|daum|kakao|naver", re.I)
 
@@ -232,14 +223,14 @@ def full_title(s: dict) -> str:
     title = s.get("title") or ""
     if s["kind"] == "doc" or not TRUNCATED.search(title):
         return title
-    from tools.fetch import cached  # fetch → sources 순환 import 방지
+    from tools.fetch import cached  # 순환 import 방지
 
     if (d := cached(s.get("url", ""))) and d.get("title"):
         return _clean_title(d["title"], s.get("site", ""))
     base = TRUNCATED.sub("", title).strip()
     body = s.get("body") or ""
     i = body.find(base)
-    if len(base) >= 10 and 0 <= i < 40:  # 포털 본문은 제목으로 시작한다: 본문 표지 앞까지(30자 이내) 이어 붙인다
+    if len(base) >= 10 and 0 <= i < 40:
         m = re.match(r"(.{1,30}?)\s(?:전체 맥락을|자동요약|[가-힣]{2,4}\s?기자\s|[가-힣A-Za-z0-9]{2,12}\s원문\s기사전송|"
                      r"20\d{2}\.\s?\d)", body[i + len(base):])
         if m:
@@ -248,7 +239,7 @@ def full_title(s: dict) -> str:
 
 
 def _ref_title(s: dict) -> str:
-    """REFERENCE 제목: 잘린 제목 복원 + 기업 DB·사이트 이름 꼬리("- 기업정보 | 투자, 매출, 기업가치", "- 유니콘팩토리") 제거."""
+    """REFERENCE 제목: 잘린 제목 복원 + 사이트 이름 꼬리 제거."""
     title, prev = full_title(s), None
     while title != prev:
         prev = title
@@ -268,10 +259,9 @@ def title_key(s: dict) -> str | None:
     return t if s["kind"] == "web" and len(t) >= 12 else None
 
 
-# 게시일이 없는 웹페이지는 REFERENCE 에 조회일을 적는다. 이 사실은 목록 줄이 아니라 보고서 한계점에 한 줄로 밝힌다
-# (과제: REFERENCE 는 '실제로 활용한 자료 목록만' 기재)
+# 게시일이 없는 웹페이지는 조회일을 적고, 보고서 한계점에 밝힌다
 ACCESS_DATE_NOTE = "게시일이 없는 웹페이지는 REFERENCE 에 조회일을 적었다"
-# 과제 지정 형식 3유형 (보고서 형식 검사용). 줄 끝에 괄호 주석을 붙이지 않는다
+# REFERENCE 형식 3유형 (보고서 형식 검사용)
 REFERENCE_FORMATS = {
     "기관 보고서": re.compile(r"^\S.*\((?:19|20)\d{2}\)\. .+\. https?://.+$"),
     "학술 논문": re.compile(r"^\S.*\((?:19|20)\d{2}\)\. .+\. .+\.$"),
@@ -291,15 +281,14 @@ def uses_access_date(s: dict) -> bool:
 
 
 def format_reference(s: dict) -> str:
-    """과제에서 지정한 REFERENCE 표기 형식 그대로 쓴다(줄 끝 주석 없음).
-    게시일을 찾지 못한 웹페이지와 목록·DB 페이지는 조회일을 쓴다(uses_access_date, 한계점에서 밝힘)."""
+    """REFERENCE 한 줄. 게시일이 없는 웹페이지와 목록·DB 페이지는 조회일을 쓴다."""
     if s["kind"] == "doc":
         if reference_group(s) == "학술 논문":
             vol = f"{s.get('volume') or ''}({s['issue']})" if s.get("issue") else str(s.get("volume") or "")
             tail = ", ".join(str(x) for x in (s.get("journal") or s.get("publisher"), vol, s.get("pages")) if x)
             return f"{s['authors']}({s['year']}). {s['title']}. {tail}."
         return f"{s['publisher']}({s['year']}). {s['title']}. {s['url']}"
-    url = unquote(s["url"]).split("#")[0]  # "#메타파머스" 같은 내부 표지는 URL 이 아니다
+    url = unquote(s["url"]).split("#")[0]
     host = _host(url)
     site, who = s["site"], s.get("author")
     if host.endswith(PORTALS):
@@ -307,14 +296,12 @@ def format_reference(s: dict) -> str:
         site, who = outlet or site, reporter or who or outlet
     org = _list_page_org(host)
     who = who or org or site
-    # 목록·DB 페이지의 날짜(설립일·자료 기준월)는 게시일이 아니다
     when = s["access_date"] if uses_access_date(s) else s["date"]
     return f"{who}({when}). {_ref_title(s)}. {site}, {url}"
 
 
 def reference_key(s: dict) -> str:
-    """같은 문서의 여러 페이지는 한 줄로, 같은 웹페이지(인코딩·쿼리 차이 포함)도 한 줄로 합친다.
-    같은 목록 URL 을 공유하는 회사별 항목(TIPS 목록 등)은 등록 키로 구분한다."""
+    """같은 문서의 여러 페이지, 같은 웹페이지는 한 줄로 합친다."""
     if s["kind"] == "doc":
         return f"doc:{s['doc_id']}"
     if s.get("key") and not s["key"].startswith("web:"):
@@ -328,7 +315,7 @@ def is_portal(s: dict) -> bool:
 
 
 def merge_duplicates(srcs: list[dict]) -> dict:
-    """같은 자료로 묶인 근거들의 대표 항목: 원 매체 페이지 우선, 제목은 가장 온전한 것, 비어 있는 기자·게시일은 사본에서 보충."""
+    """같은 자료로 묶인 근거들의 대표 항목 (원 매체 페이지 우선)."""
     best = dict(next((s for s in srcs if not is_portal(s)), srcs[0]))
     if len(srcs) == 1 or best["kind"] == "doc":
         return best
@@ -341,7 +328,7 @@ def merge_duplicates(srcs: list[dict]) -> dict:
 
 
 def today() -> str:
-    """조회일 = 평가 기준일 (재현 모드에서는 고정)."""
+    """조회일 = 평가 기준일."""
     from core.config import run_date
 
     return run_date()

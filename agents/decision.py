@@ -1,21 +1,12 @@
-"""🧮 투자 판단 에이전트 (노드 decide).
+"""투자 판단 에이전트 (노드 decide).
 
-1) 판정: 실적(R1~R4)·투자조건(D1~D4)은 여기서 core.judge.judge_dimension 으로 판정한다. 창업자·시장성·제품/기술력·경쟁 우위는
-   각 분석 에이전트가 state[키]['criterion'] 에 둔 판정을 쓰고, 없거나 문항이 모자라면 여기서 최종 근거 풀로 보완 판정한다.
+1) 판정: 실적(R1~R4)·투자조건(D1~D4)은 여기서 판정하고, 나머지 기준은 각 분석 에이전트의 판정을 쓴다.
 2) 점수(코드): Payne Scorecard 의 비교 원리(동종 투자 유치 기업 평균 = 1.00)로 배수 M 을 구한다.
    - 문항 신호 x: YES +1, NO −1, 미확인 0 (N/A 제외)
-   - 동종 평균 x̄: 보정 실행(app.py --calibrate)이 만든 data/reference_class.json 의 문항별 평균.
-     대상이 기준 집단에 있으면 자기 자신을 뺀 평균(LOO). 파일이 없거나 문항 목록이 옛것이거나 decision.reference_min_n 곳보다
-     적으면 x̄ = 0(fallback, 설계 가정)
+   - 동종 평균 x̄: data/reference_class.json 의 문항별 평균 (대상이 집단에 있으면 자기 제외)
    - 기준 d 마다 c_d = clip(1 + step × 평균_q(x_q − x̄_q)), M = Σ (가중치/100) × c_d
-3) 결정(코드): 투자 ⇔ M > decision.threshold(1.00) ∧ 창업자 기준 c_founder ≥ decision.founder_min_c(1.00) ∧ Deal-killer 없음.
-   두 기준값 모두 Payne 원 방법의 기준점 '투자를 받은 동종 평균 기업 = 100%' 그대로다(새로 정한 숫자 없음).
-   - M > 1.00: 이미 투자를 받은 동종 기업의 평균보다 낫다.
-   - c_founder ≥ 1.00: 팀이 동종 평균 이상이다 — "A great team will fix early product flaws, but the reverse is not true"(Payne 2019).
-   - Deal-killer: Payne 워크시트의 deal killer 개념(조건 K1~K3 는 rubric.yaml).
-   보류 유형(보고서의 '왜 안 되는가' 이름표, 앞선 것 우선): Deal-killer > 창업자 점수 평균 미만 > 동종 평균 이하.
-4) 보고서 재료(코드): 뒤집힘 조건, 실사 항목, Bessemer 10문, ROI 참고치, 기준 배수 민감도, 동종 순위.
-보정 실행(workflow.calibrate)에서는 기준 집단을 만드는 중이라 결정하지 않는다(decision None, 판정·신호만 기록).
+3) 결정(코드): 투자 ⇔ M > 1.00 ∧ 창업자 기준 c_founder ≥ 1.00 ∧ Deal-killer 없음.
+4) 보고서 재료: 뒤집힘 조건, 실사 항목, Bessemer 10문, ROI 참고치, 기준 배수 민감도, 동종 순위.
 """
 from __future__ import annotations
 
@@ -26,12 +17,12 @@ from pathlib import Path
 
 from core.config import ROOT, get_config
 from core.judge import SIGNAL, evidence_pool, judge_dimension
-from core.judge import load_rubric  # 판정 공용 모듈로 옮김. agents.report 가 이 이름으로 import 하므로 재수출
+from core.judge import load_rubric  # agents.report 가 이 이름으로 import
 from tools.grounding import norm
 from tools.sources import SourceRegistry
 
 AGENT = "decision"
-HOLD_TYPES = ("Deal-killer", "창업자 점수 평균 미만", "동종 평균 이하")   # 앞선 것 우선 (시나리오 실행에서는 마지막이 '기준 이하')
+HOLD_TYPES = ("Deal-killer", "창업자 점수 평균 미만", "동종 평균 이하")   # 앞선 것 우선
 UNDISCLOSED = ("비공개", "미공개", "undisclosed", "비밀", "n/a")
 
 __all__ = ["decision_node", "load_rubric", "load_reference", "write_reference_class", "write_threshold_sensitivity",
@@ -40,7 +31,7 @@ __all__ = ["decision_node", "load_rubric", "load_reference", "write_reference_cl
 
 # ── 공통 계산 도우미
 def _x(r: dict) -> int | None:
-    """문항 신호. 행에 x 가 있으면 그 값, 없으면 판정 값으로 정한다 (v1 행에는 x 가 없음)."""
+    """문항 신호. 행에 x 가 있으면 그 값, 없으면 판정 값으로 정한다."""
     return r["x"] if "x" in r else SIGNAL.get(r.get("answer"), 0)
 
 
@@ -97,7 +88,7 @@ def _rows_from_signals(signals: dict, rubric: dict) -> list[dict]:
             for d in rubric["dimensions"] for q in d["questions"]]
 
 
-# ── 동종 기준 집단 (계약 C10)
+# ── 동종 기준 집단
 def _ref_path(p: str | None = None) -> Path:
     p = Path(p or get_config().decision.reference_file)
     return p if p.is_absolute() else ROOT / p
@@ -138,10 +129,8 @@ def _reference(data: dict | None, exclude: str | None, rubric: dict, min_n: int)
 
 
 def load_reference(exclude: str | None = None) -> dict:
-    """동종 기준 집단(config decision.reference_file)의 문항별 평균 신호.
-    exclude: 평가 대상 이름 — 기준 집단에 있으면 빼고 평균을 낸다(자기 제외, LOO).
-    파일이 없거나, 문항 목록이 현재 rubric 과 다르거나, 빼고 남은 구성원이 decision.reference_min_n 보다 적으면
-    평균 0(source 'fallback')이다.
+    """동종 기준 집단의 문항별 평균 신호. exclude 는 빼고 평균을 낸다(자기 제외).
+    파일이 없거나 구성원이 decision.reference_min_n 보다 적으면 평균 0(fallback).
     반환: {'mean': {qid: float}, 'n': int, 'loo': bool, 'source': 'calibration'|'fallback', 'members': [이름],
           'run_date': str|None, 'note': fallback 사유 또는 None}"""
     return _reference(_read_json(_ref_path()), exclude, load_rubric(), get_config().decision.reference_min_n)
@@ -158,7 +147,7 @@ def _reference_data(evaluations: list[dict], run_date: str, created_by: str) -> 
         sig = {r["qid"]: _x(r) for r in rows}
         members[norm(e["name"])] = {"name": e["name"], "region": e.get("region"), "stage": e.get("stage"),
                                     "segment_id": e.get("segment_id"), "signals": {q: sig.get(q, 0) for q in qids}}
-    ms = list(members.values())   # 같은 이름을 두 번 평가했으면 마지막 평가를 쓴다
+    ms = list(members.values())
     return {"version": 1, "run_date": run_date, "rubric_qids": qids, "created_by": created_by, "n": len(ms),
             "members": ms, "mean": {q: round(v, 4) for q, v in _mean(ms, qids).items()}}
 
@@ -170,11 +159,7 @@ def _write_json(p: str | Path, data: dict) -> None:
 
 
 def write_reference_class(evaluations: list[dict], path: str, run_date: str) -> dict:
-    """보정 실행(app.py --calibrate)의 평가 결과로 동종 기준 집단 파일을 쓴다.
-    evaluations 원소의 scorecard.rows(없으면 rows)에서 문항 신호를 읽는다. 같은 이름은 마지막 평가만 남긴다.
-    파일 형식: {'version': 1, 'run_date', 'rubric_qids': [24개], 'created_by': 'app.py --calibrate', 'n',
-               'members': [{'name','region','stage','segment_id','signals': {qid: 1|-1|0|None}}], 'mean': {qid: float}}
-    반환: 쓴 내용(dict)."""
+    """보정 실행의 평가 결과로 동종 기준 집단 파일을 쓰고 그 내용을 돌려준다."""
     data = _reference_data(evaluations, run_date, "app.py --calibrate")
     _write_json(path, data)
     return data
@@ -194,11 +179,7 @@ def _peer_scores(data: dict, rubric: dict) -> list[dict]:
 
 
 def write_threshold_sensitivity(ref_path: str, out_path: str) -> dict:
-    """기준 집단 구성원마다 자기 제외 배수(multiplier_loo)를 구하고, config decision.sensitivity 의 각 기준 배수에서의 결정을 기록한다.
-    파일 형식: {'thresholds': [...], 'threshold': 현재 기준, 'reference_n': int,
-               'members': [{'name','multiplier_loo','founder_yes','founder_c','killers','decision_at': {'1.00': '투자'|'보류', …}}],
-               'invest_count_at': {'1.00': int, …}}   (members 는 배수 내림차순)
-    반환: 쓴 내용(dict)."""
+    """기준 배수(decision.sensitivity)별로 기준 집단 구성원의 결정을 기록하고 그 내용을 돌려준다."""
     d = get_config().decision
     data = _read_json(_ref_path(ref_path))
     if data is None:
@@ -217,12 +198,10 @@ def write_threshold_sensitivity(ref_path: str, out_path: str) -> dict:
     return out
 
 
-# ── 점수와 결정 (계약 C7)
+# ── 점수와 결정
 def payne_multiplier(rows: list[dict], mean: dict, rubric: dict, step: float, clip: list) -> tuple[float, list[dict]]:
-    """Payne Scorecard 의 비교 원리(동종 평균 = 1.00)로 배수 M 을 구한다.
-    기준 d 마다 c_d = clip(1 + step × 평균_q(x_q − x̄_q)) (N/A 문항 제외, 문항이 없으면 1.0), M = Σ (weight/100) × c_d.
-    반환: (M 소수 4자리, criteria) — criteria 원소 {dim, name, weight, yes, no, unknown, n, pct, peer_mean, contribution}
-    pct = c_d × 100 (동종 평균 100 대비), peer_mean = 그 기준 문항들의 동종 평균 신호 x̄ 평균, contribution = weight/100 × c_d."""
+    """배수 M = Σ (weight/100) × c_d, c_d = clip(1 + step × 평균_q(x_q − x̄_q)).
+    반환: (M, 기준별 {dim, name, weight, yes, no, unknown, n, pct, peer_mean, contribution})"""
     lo, hi = clip
     M, criteria = 0.0, []
     for d in rubric["dimensions"]:
@@ -242,12 +221,11 @@ def payne_multiplier(rows: list[dict], mean: dict, rubric: dict, step: float, cl
 
 
 def decide_rule(M: float, founder_c: float, killers: list[str], unknown_ratio: float, cfg) -> tuple[str, str | None, list[str]]:
-    """투자 ⇔ M > decision.threshold(동종 평균 1.00) ∧ founder_c ≥ decision.founder_min_c(동종 평균 1.00) ∧ Deal-killer 없음.
-    보류 유형 우선순위: 'Deal-killer' > '창업자 점수 평균 미만' > '동종 평균 이하'. 미확인 비율은 이름표가 아니라 사유 문장에만 적는다.
-    반환: (결정 '투자'|'보류', 보류 유형 또는 None, 사람이 읽는 사유 문장 목록 — 보류면 보류 유형의 사유가 맨 앞)"""
+    """투자 ⇔ M > threshold ∧ founder_c ≥ founder_min_c ∧ Deal-killer 없음.
+    반환: (결정 '투자'|'보류', 보류 유형 또는 None, 사유 문장 목록)"""
     d = cfg.decision
     t, need = d.threshold, d.founder_min_c
-    score, team = _vs_peer("동종 평균 대비", M, t), _vs_peer("창업자 기준", founder_c, need)   # 보고서 표기와 같은 형식
+    score, team = _vs_peer("동종 평균 대비", M, t), _vs_peer("창업자 기준", founder_c, need)
     if _decide(M, founder_c, killers, t, need) == "투자":
         return "투자", None, [f"{score} — {_bar(t)}보다 높음", f"{team} — {_bar(need)} 이상", "Deal-killer 없음"]
     text = {k["id"]: k["text"] for k in load_rubric()["deal_killers"]}
@@ -257,18 +235,14 @@ def decide_rule(M: float, founder_c: float, killers: list[str], unknown_ratio: f
     if M <= t:
         reasons.append(f"{score} — {_bar(t)} 이하 (미확인 문항 {unknown_ratio:.0%})")
     hold = ("Deal-killer" if killers else "창업자 점수 평균 미만" if founder_c < need
-            else "동종 평균 이하" if abs(t - 1) < 1e-9 else "기준 이하")   # 시나리오 실행(--threshold)에서는 '기준 이하'
+            else "동종 평균 이하" if abs(t - 1) < 1e-9 else "기준 이하")
 
     return "보류", hold, reasons
 
 
 def flip_conditions(rows: list[dict], mean: dict, rubric: dict, cfg, founder_ok: bool, killers: list[str]) -> dict | None:
-    """보류 후보의 뒤집힘 조건: 미확인 문항 중 YES 로 확인되면 M 이 가장 많이 오르는 문항을 하나씩(탐욕적으로) 골라,
-    투자 조건(M > 기준, 창업자 기준 c_founder ≥ decision.founder_min_c)을 채우거나 decision.flip_max_items 개가 될 때까지 더하고
-    새 배수 M' 을 계산한다. 창업자 기준이 모자라면(founder_ok False) 창업자 문항을 먼저 넣는다.
-    Deal-killer 가 있으면 미확인 문항으로는 뒤집을 수 없어 new_multiplier None 과 'Kx 해소 필요'를 돌려준다.
-    반환: {'qids': [str], 'items': [str], 'new_multiplier': float|None, 'reached': bool, 'note': str}
-    (호출하는 decision_node 는 보류일 때만 부르고, 투자면 flip 을 None 으로 둔다)"""
+    """보류 후보의 뒤집힘 조건: M 을 가장 많이 올리는 미확인 문항을 하나씩 YES 로 바꿔 투자 조건을 채우는지 본다.
+    반환: {'qids': [str], 'items': [str], 'new_multiplier': float|None, 'reached': bool, 'note': str}"""
     d = cfg.decision
     info = _questions(rubric)
     if killers:
@@ -290,11 +264,11 @@ def flip_conditions(rows: list[dict], mean: dict, rubric: dict, cfg, founder_ok:
     while not done() and len(picked) < d.flip_max_items:
         cand = [i for i, r in enumerate(cur) if r["answer"] == "UNKNOWN"]
         if not founder_ok and fc < d.founder_min_c:
-            cand = [i for i in cand if cur[i]["dim"] == "founder"]   # 창업자 요건부터 채운다
+            cand = [i for i in cand if cur[i]["dim"] == "founder"]
         if not cand:
             break
         gain = {i: score(_with_yes(cur, i)) for i in cand}
-        best = max(cand, key=lambda i: (gain[i][0], -i))              # 같으면 평가표 순서
+        best = max(cand, key=lambda i: (gain[i][0], -i))
         cur, (M, fc) = _with_yes(cur, best), gain[best]
         picked.append(cur[best]["qid"])
     if not picked:
@@ -310,8 +284,7 @@ def flip_conditions(rows: list[dict], mean: dict, rubric: dict, cfg, founder_ok:
 
 
 def _dd_items(rows: list[dict], mean: dict, rubric: dict, cfg, killers: list[str]) -> list[dict]:
-    """실사 항목: 미확인·NO 문항 중 YES 로 확인될 때 배수가 크게 오르는 순서(Deal-killer 문항은 맨 앞)로
-    decision.dd_max_items 개를 rubric dd_item 문구로 만든다. 반환 [{qid, item, why}]."""
+    """실사 항목: YES 로 확인되면 배수가 크게 오르는 미확인·NO 문항 순. 반환 [{qid, item, why}]."""
     d = cfg.decision
     info = _questions(rubric)
     base, _ = payne_multiplier(rows, mean, rubric, d.step, d.clip)
@@ -358,7 +331,7 @@ def _num(s: str) -> float:
 
 
 def parse_amount(s: str) -> dict | None:
-    """라운드 금액 문자열 → {'krw': float|None, 'usd_m': float|None}. 예: '30억 원' → krw 3e9, '$12M'·'12 million' → usd_m 12.
+    """라운드 금액 문자열 → {'krw': float|None, 'usd_m': float|None}. 예: '30억 원' → krw 3e9, '$12M' → usd_m 12.
     - 첫 금액 표현만 읽는다. 한국식 단위는 이어진 조각을 더한다('259억 9991만원' → 259.9991억, '1,500만 달러' → usd_m 15).
     - 통화: 금액 바로 앞뒤 4글자의 $·달러·USD / 원·KRW 표기. 표기가 없으면 조·억·만 단위는 원화, million·M 단위는 달러로 본다.
     - '비공개'·빈 문자열처럼 금액이 없거나, 단위·통화 표기 없는 숫자만 있거나, 달러·원화가 아닌 통화(€ 등)면 None."""
@@ -379,7 +352,7 @@ def parse_amount(s: str) -> dict | None:
     else:
         m = re.search(_NUM, t)
         value, start, end, default = _num(m.group()), m.start(), m.end(), None
-    near = t[max(0, start - 4):start] + " " + t[end:end + 4]   # 금액 바로 앞뒤 4글자의 통화 표기
+    near = t[max(0, start - 4):start] + " " + t[end:end + 4]
     cur = ("USD" if _USD.search(near) else "KRW" if _KRW.search(near) else None if _OTHER.search(near) else default)
     if cur == "USD":
         return {"krw": None, "usd_m": value / 1e6}
@@ -389,11 +362,9 @@ def parse_amount(s: str) -> dict | None:
 
 
 def roi(current: dict, market: dict, cfg) -> dict:
-    """ROI 참고치 (점수에 쓰지 않음). 두 가지만 계산한다.
-    1) 라운드 금액 대 단계별 중앙값: config roi.stage_median_usd_m (AgFunder 2026 p.13)
-    2) VC Method 필요 Exit(가정): post-money = 금액 ÷ 지분율 가정(roi.stake_assumption), 필요 Exit = post-money × roi.target_multiple
-    라운드 금액을 모르면 computable=False. 가정 값은 assumptions 에 '가정'을 붙인 문장으로 남긴다.
-    market 은 계약 시그니처라 받지만 쓰지 않는다(세부 시장 규모 대비 회수 여력 경고는 넣지 않기로 함).
+    """ROI 참고치 (점수에 쓰지 않음).
+    1) 라운드 금액 대 단계별 중앙값 (config roi.stage_median_usd_m)
+    2) VC Method 필요 Exit(가정) = 금액 ÷ 지분율 가정 × 목표 배수
     반환: {'computable','round_amount_raw','round_amount_usd_m','stage','stage_median_usd_m','vs_stage_median',
            'stake_assumption','post_money_usd_m': [lo, hi]|None,'target_multiple','required_exit_usd_m': [lo, hi]|None,
            'assumptions': [str],'source_ids': [str],'stage_median_source': str,'note': str|None}"""
@@ -437,7 +408,7 @@ def _nps_line(n: dict) -> str:
 
 
 def _analysis_text(state: dict) -> str:
-    """판정 프롬프트의 [분석 요약]. v1 형식을 따르되 창업자·팀은 👤 창업자 에이전트 결과(state['founder'])에서 읽는다."""
+    """판정 프롬프트의 [분석 요약]."""
     c, f = state["current"], state.get("founder") or {}
     t, m, k = state.get("tech") or {}, state.get("market") or {}, state.get("competition") or {}
     people = "; ".join(f"{p['name']}({p.get('role')}): {p.get('background')}" for p in f.get("people", [])) or "확인 불가"
@@ -503,7 +474,7 @@ def decision_node(state: dict) -> dict:
     counts = f"YES {sum(r['answer'] == 'YES' for r in rows)} · NO {sum(r['answer'] == 'NO' for r in rows)} · 미확인 {unknown_ratio:.0%}"
 
     if cfg.workflow.get("calibrate"):
-        # 2') 보정 실행: 기준 집단을 만드는 중이라 배수·결정을 내지 않고 판정·신호만 남긴다
+        # 2') 보정 실행: 판정·신호만 남긴다
         _, criteria = payne_multiplier(rows, {}, rubric, dc.step, dc.clip)
         criteria = [{**x, "pct": None, "peer_mean": None, "contribution": None} for x in criteria]
         decision = hold_type = flip = M = score100 = None
@@ -548,7 +519,7 @@ def decision_node(state: dict) -> dict:
                   "criteria": criteria, "scorecard": scorecard, "founder": state.get("founder"), "tech": state.get("tech"),
                   "market": state.get("market"), "competition": state.get("competition"), "profile": c}
     out = {"scorecard": scorecard, "decision": decision, "evaluations": [evaluation], "log": [msg]}
-    from graph.routes import stops_on_invest  # 라우터와 같은 규칙으로 종료 사유를 적는다
+    from graph.routes import stops_on_invest
 
     if decision == "투자" and stops_on_invest(cfg.workflow):
         out["end_reason"] = "invest_found"

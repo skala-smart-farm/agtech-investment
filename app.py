@@ -1,11 +1,11 @@
 """AgTech 스타트업 투자 평가 에이전트 실행 스크립트.
 
     python app.py                  # 탐색 → 창업자·기술·시장성·경쟁사 → 투자 판단 → 보고서(PDF)
-    python app.py --offline        # 재현 테스트: 저장소의 캐시(replay/)만 쓰고 API 키 없이 실행
-    python app.py --calibrate      # 보정 실행: 투자여도 멈추지 않고 평가 상한까지 평가해 동종 기준 집단
-                                          #   (data/reference_class.json)과 기준 배수 민감도를 만든다. 보고서는 만들지 않는다
-    python app.py --threshold 1.30 --out outputs/scenario_hold   # 시나리오 실행: 기준 배수만 바꿔 다른 보고서 모드 확인
-    python app.py --graph-only     # 그래프 그림(docs/architecture.png, docs/architecture_langgraph.png)만 생성
+    python app.py --fresh          # 캐시 없이 검색·LLM 을 새로 호출
+    python app.py --offline        # 저장된 캐시만 쓰고 API 키 없이 실행
+    python app.py --calibrate      # 평가 상한까지 평가해 동종 기준 집단(data/reference_class.json)을 만든다 (보고서 없음)
+    python app.py --out DIR        # 결과를 DIR 에 쓴다 (제출용 파일은 만들지 않음)
+    python app.py --graph-only     # 그래프 그림만 생성
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import sys
 import time
 import warnings
 
-warnings.filterwarnings("ignore")  # 라이브러리 경고로 진행 로그가 묻히지 않게
+warnings.filterwarnings("ignore")
 
 from core.config import ROOT, get_config, path, require_keys
 from core.config import run_date as get_run_date
@@ -25,8 +25,8 @@ from core.cost import TRACKER
 from graph.builder import build_graph
 from tools import web_search as web_search_mod
 
-CALIBRATION_DIR = "outputs/calibration"                          # 보정 실행의 실행 기록 폴더
-SENSITIVITY_FILE = "outputs/eval/threshold_sensitivity.json"     # 기준 배수별 투자 추천 수
+CALIBRATION_DIR = "outputs/calibration"
+SENSITIVITY_FILE = "outputs/eval/threshold_sensitivity.json"
 SCREENED_KEYS = ("name", "region", "stage", "round_date", "founded_date", "ceo", "eligible", "reason",
                  "gate_search_failed", "channels")
 EVALUATION_KEYS = ("name", "region", "stage", "decision", "hold_type", "multiplier", "score100", "reasons", "flip")
@@ -34,23 +34,18 @@ ROW_KEYS = ("qid", "answer", "rationale", "quote", "evidence_ids")
 
 
 def save_graph_image(app) -> str:
-    """README Architecture 그림 2종.
-    - docs/architecture.png          : 설계서와 같은 한글 설명 그림 (docs.build_design._main_mermaid)
-    - docs/architecture_langgraph.png: 컴파일된 LangGraph 가 직접 그린 그림. xray=1 이라 🔍 탐색 서브그래프 안쪽까지 그린다
-                                       (코드와 설계가 같은지 확인용)"""
-    from docs.build_design import _main_mermaid
+    """LangGraph 가 직접 그린 그래프 그림 (docs/architecture_langgraph.png)."""
     from report.mermaid import mermaid_to_png
 
     mmd = app.get_graph(xray=1).draw_mermaid()
     path("docs/architecture_langgraph.mmd").write_text(mmd, encoding="utf-8")
-    mermaid_to_png(mmd, path("docs/architecture_langgraph.png"))
-    out = path("docs/architecture.png")
-    mermaid_to_png(_main_mermaid(get_config()), out)
+    out = path("docs/architecture_langgraph.png")
+    mermaid_to_png(mmd, out)
     return str(out)
 
 
 def _check_browser() -> None:
-    """PDF 는 마지막 단계에서 만들기 때문에, Chromium 이 없으면 처음부터 알려 준다."""
+    """PDF 생성용 Chromium 이 없으면 시작할 때 멈춘다."""
     from pathlib import Path
 
     from playwright.sync_api import sync_playwright
@@ -80,8 +75,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def apply_options(args: argparse.Namespace, cfg) -> str:
-    """실행 옵션을 설정에 반영하고 실행 모드(main | calibrate | scenario)를 돌려준다.
-    get_config() 캐시 객체의 원본 dict 를 고치므로 이후 노드가 get_config() 로 읽어도 바뀐 값이 보인다."""
+    """실행 옵션을 설정에 반영하고 실행 모드(main | calibrate | scenario)를 돌려준다."""
     if args.fresh:
         cfg["cache"]["dir"] = "cache_fresh"
     if args.threshold is not None:
@@ -99,7 +93,7 @@ def apply_options(args: argparse.Namespace, cfg) -> str:
 
 
 def search_notice(args: argparse.Namespace, cfg) -> str:
-    """검색 공급자 안내 한 줄. 재현 실행은 캐시만 읽으므로 키·공급자와 무관하다는 것을 먼저 알린다."""
+    """검색 공급자 안내 한 줄."""
     names = " → ".join(p.capitalize() for p in web_search_mod.active_providers()) or "없음"
     if not (args.fresh or args.retry_failed):
         return f"   검색: 재현용 캐시({cfg.cache.dir}/)에서 읽음 — 검색 키·공급자와 무관 (공급자 {names})"
@@ -138,13 +132,13 @@ def build_run_log(state: dict, cfg, *, mode: str, run_date: str, elapsed: float)
 
 
 def _write_json(rel: str, data: dict) -> None:
-    # 공개 저장소에 로컬 절대경로가 남지 않게 저장소 기준 상대경로로 적는다
+    # 로컬 절대경로 대신 저장소 기준 상대경로
     text = json.dumps(data, ensure_ascii=False, indent=2).replace(str(ROOT) + "/", "")
     path(rel).write_text(text, encoding="utf-8")
 
 
 def v1_evaluated_names() -> list[str] | None:
-    """v1-safe 태그의 제출 실행 기록(outputs/run_log.json)에서 심층 평가한 후보 이름. 태그나 git 이 없으면 None."""
+    """v1-safe 태그의 실행 기록에서 평가한 후보 이름. 태그가 없으면 None."""
     try:
         out = subprocess.run(["git", "show", "v1-safe:outputs/run_log.json"], cwd=ROOT, capture_output=True)
     except OSError:
@@ -155,7 +149,7 @@ def v1_evaluated_names() -> list[str] | None:
 
 
 def check_v1_members(names: list[str]) -> bool | None:
-    """캐시 보존 게이트: 발굴·관문을 v1 캐시 그대로 재생했다면 보정 실행이 평가한 후보는 v1 평가 후보와 같다."""
+    """보정 실행의 평가 후보가 v1-safe 태그의 평가 후보와 같은지."""
     v1 = v1_evaluated_names()
     if v1 is None:
         print("[캐시 보존 확인] v1-safe 태그를 찾지 못해 비교를 건너뜁니다.")
@@ -169,7 +163,7 @@ def check_v1_members(names: list[str]) -> bool | None:
 
 
 def finish_calibration(state: dict, cfg, run_date: str) -> dict:
-    """보정 실행 뒤: 평가 결과로 동종 기준 집단 파일과 기준 배수 민감도를 쓰고 요약을 출력한다."""
+    """보정 실행 뒤: 동종 기준 집단 파일과 기준 배수 민감도를 쓴다."""
     from agents.decision import write_reference_class, write_threshold_sensitivity
 
     evaluations = state.get("evaluations", [])
@@ -179,10 +173,10 @@ def finish_calibration(state: dict, cfg, run_date: str) -> dict:
     n, need = ref.get("n") or 0, cfg.decision.reference_min_n
     enough = n >= need
     print(f"기준 집단: {n}곳 → {ref_file}")
-    if not enough:  # 본 실행은 이 파일 대신 동종 평균 신호 0(fallback)으로 계산하게 된다
+    if not enough:
         print(f"[경고] 기준 집단 {n}곳 < 최소 {need}곳(decision.reference_min_n). 본 실행은 fallback(동종 평균 신호 0)으로 계산됩니다.")
     print(f"기준 배수별 투자 추천 수: {json.dumps(sens.get('invest_count_at', {}), ensure_ascii=False)} → {SENSITIVITY_FILE}")
-    same = check_v1_members([m["name"] for m in ref.get("members") or []])  # 실제로 파일에 쓴 구성원을 v1 과 비교
+    same = check_v1_members([m["name"] for m in ref.get("members") or []])
     return {"reference_file": ref_file, "reference_n": n, "reference_enough": enough, "sensitivity_file": SENSITIVITY_FILE,
             "invest_count_at": sens.get("invest_count_at"), "same_as_v1_evaluated": same}
 
@@ -190,7 +184,7 @@ def finish_calibration(state: dict, cfg, run_date: str) -> dict:
 def main(argv: list[str] | None = None) -> None:
     warnings.filterwarnings("ignore")
     if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)  # 파일로 내보낼 때도 진행 로그가 바로 보이게
+        sys.stdout.reconfigure(line_buffering=True)
     args = parse_args(argv)
     if args.retry_failed:
         os.environ["SEARCH_RETRY_FAILED"] = "1"
@@ -199,9 +193,9 @@ def main(argv: list[str] | None = None) -> None:
     _check_browser()
 
     cfg = get_config()
-    base_out = cfg.report.output_dir  # 비용 기록은 모드와 관계없이 기본 출력 폴더 한 곳에 모은다
+    base_out = cfg.report.output_dir
     mode = apply_options(args, cfg)
-    if args.fresh or args.retry_failed:  # 새로 호출할 실행은 키가 없으면 중간이 아니라 시작할 때 멈춘다
+    if args.fresh or args.retry_failed:
         require_keys()
     app = build_graph()
     if args.graph_only:
@@ -211,7 +205,7 @@ def main(argv: list[str] | None = None) -> None:
     t0 = time.time()
     run_date = get_run_date()
     meta = path(f"{cfg.cache.dir}/run_meta.json")
-    if not meta.exists():  # 처음 실행한 날을 기준일로 기록 → 같은 캐시로 다시 돌리면 같은 날짜 기준으로 판정
+    if not meta.exists():  # 같은 캐시로 다시 돌리면 같은 기준일
         meta.write_text(json.dumps({"run_date": run_date}), encoding="utf-8")
     print(f"== AgTech 스타트업 투자 평가 시작 ({run_date}, 모드 {mode}, 기준 배수 {cfg.decision.threshold}, "
           f"생성 {cfg.models.generator}, 판정 {cfg.models.judge}, 임베딩 {cfg.embedding.model}, 캐시 {cfg.cache.dir}/) ==")
@@ -221,9 +215,9 @@ def main(argv: list[str] | None = None) -> None:
 
     out_dir = cfg.report.output_dir
     run_log = build_run_log(state, cfg, mode=mode, run_date=run_date, elapsed=elapsed)
-    _write_json(f"{out_dir}/run_log.json", run_log)  # 보정 파일을 쓰다 실패해도 평가 기록은 남도록 먼저 저장
+    _write_json(f"{out_dir}/run_log.json", run_log)
     cost = TRACKER.summary()
-    if cost.get("api_calls"):  # 실제로 API 를 부른 실행만 비용 기록을 남긴다 (캐시 재생 실행은 0원이라 남기지 않음)
+    if cost.get("api_calls"):
         with open(path(f"{base_out}/cost_history.jsonl"), "a", encoding="utf-8") as f:
             f.write(json.dumps({"run_date": run_date, "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                                 "elapsed_sec": elapsed, "fresh": args.fresh, "mode": mode, **cost},

@@ -1,10 +1,10 @@
-# 실행 설정. 모델 이름·검색 파라미터·평가 기준 수치는 코드에 박지 않고 여기서만 바꾼다.
+# 실행 설정. 모델 이름·검색 파라미터·평가 기준 수치는 여기서만 바꾼다.
 
 domain:
   name: AgTech
   description: "AI·센서·로봇으로 작물 재배, 병해충 진단, 수확, 축산 등 농업 생산성을 높이는 기술"
-  region_priority: [KR, GLOBAL]        # 같은 순번이면 국내 먼저. 검증·평가 슬롯은 workflow.screen_kr : screen_global 로 나눈다
-  # 세부 분야: 발굴 쿼리와 시장 분석 단위로 쓴다 (ko: 한국어 검색어, en: 영문 검색어)
+  region_priority: [KR, GLOBAL]        # 같은 순번이면 국내 먼저
+  # 세부 분야: 발굴 쿼리와 시장 분석 단위 (ko: 한국어 검색어, en: 영문 검색어)
   segments:
     - {id: greenhouse, name: "스마트팜·시설원예 AI 환경제어", ko: "스마트팜 AI", en: "AI greenhouse controlled environment agriculture"}
     - {id: diagnosis, name: "작물 생육·병해충 진단 AI", ko: "작물 병해충 진단 AI", en: "AI crop disease detection"}
@@ -14,19 +14,19 @@ domain:
 
 models:
   generator: gpt-4.1-mini              # 분석·보고서 작성
-  judge: gpt-4.1-mini                  # 문서 관련성 판정, 평가 기준 O/X 판정, RAG 답변 평가
+  judge: gpt-4.1-mini                  # 관련성 판정, 평가 문항 판정, RAG 답변 평가
   temperature: 0
-  max_output_tokens:                   # v2 에서 새로 부르는 구조화 출력의 출력 상한 (core/llm_bounded.py). 반복 퇴행 방지용
-    default: 2500                      # v1 실측 최대: 분석 944·판정 668 토큰
-    report: 4000                       # v1 실측 최대: 보고서 초안 1,947 토큰
-    summarize: 1500                    # 문서 요약 도구 한 조각
-  price_per_mtok:                      # 비용 집계용 공개 가격 USD / 100만 토큰 [입력, 출력] (core/cost.py·eval/api_usage.py 가 읽음)
-    gpt-4.1-mini: [0.40, 1.60]         # 프롬프트 캐시로 처리된 입력은 입력 가격의 1/4 로 계산
+  max_output_tokens:                   # 구조화 출력 상한 (반복 퇴행 방지)
+    default: 2500
+    report: 4000
+    summarize: 1500
+  price_per_mtok:                      # 비용 집계용 가격 USD / 100만 토큰 [입력, 출력]
+    gpt-4.1-mini: [0.40, 1.60]
     gpt-4.1-nano: [0.10, 0.40]
 
 embedding:
-  model: nlpai-lab/KURE-v1             # 실제 파이프라인 설정(Hit@4·MRR@4)으로 잰 결과로 선정 (outputs/eval/retrieval_decision.md)
-  query_prefix: ""                     # bge-m3 계열: 질의·문서 모두 접두어 없음
+  model: nlpai-lab/KURE-v1             # Hit@4·MRR@4 측정으로 선정 (outputs/eval/retrieval_decision.md)
+  query_prefix: ""
   passage_prefix: ""
   batch_size: 16
   normalize: true
@@ -34,34 +34,33 @@ embedding:
 rag:
   corpus_dir: data/corpus
   manifest: data/manifest.yaml
-  max_total_pages: 200                 # 과제 조건: 문서 전체 200페이지 이내
+  max_total_pages: 200                 # 문서 전체 200페이지 이내
   chunk_size: 800
   chunk_overlap: 100
-  top_k: 4                             # 최종 컨텍스트 조각 수 (3~5 범위)
+  top_k: 4                             # 최종 컨텍스트 조각 수
   candidate_k: 8                       # 앙상블 전에 각 검색기가 가져오는 수
-  ensemble_weights: [0.4, 0.6]         # [Kiwi BM25, FAISS dense] — 미리 정한 규칙(Hit@4 → MRR@4)의 1위. 0.1~0.4 는 Hit@4 가 같음
-  min_relevant: 3                      # 최종 4개 중 3개 이상 관련이어야 통과 (적으면 질의 재작성)
-  max_rewrites: 2                      # Agentic RAG 재작성 루프 상한
+  ensemble_weights: [0.4, 0.6]         # [Kiwi BM25, FAISS dense]
+  min_relevant: 3                      # 최종 조각 중 관련 조각이 이 수보다 적으면 질의 재작성
+  max_rewrites: 2                      # 질의 재작성 상한
   web_fallback: true                   # 재작성 후에도 부족하면 웹 검색으로 보완
-  max_regenerations: 1                 # 답변 점검 결과 근거에 없는 내용이 있으면(not_grounded) 검색은 두고 답변만 다시 쓰는 횟수 상한
-  rag_recursion_limit: 25              # RAG 서브그래프 recursion_limit (무한 루프 방지)
-  context_doc_chars: 1200              # 답변 생성·점검에 넘기는 문서 조각 최대 글자 수 (조각이 800자라 사실상 전부)
-  context_web_chars: 800               # 답변 생성·점검에 넘기는 웹 근거 스니펫 최대 글자 수
-  allow_direct_answer: false           # 검색 없이 바로 답하는 경로. 분석 에이전트 호출에서는 끈다(수치 환각 방지). 라우팅 시연(eval_judge)만 켜서 부른다
+  max_regenerations: 1                 # 답변이 근거와 안 맞을 때(not_grounded) 다시 쓰는 횟수 상한
+  rag_recursion_limit: 25              # RAG 서브그래프 recursion_limit
+  context_doc_chars: 1200              # 답변 생성·점검에 넘기는 문서 조각 최대 글자 수
+  context_web_chars: 800               # 답변 생성·점검에 넘기는 웹 스니펫 최대 글자 수
+  allow_direct_answer: false           # 검색 없이 바로 답하는 경로 (수치 환각 방지로 끔)
 
 tools:
-  summarize_max_chars: 6000            # 문서 요약 도구(summarize_document)에 넣는 원문 최대 글자 수
+  summarize_max_chars: 6000            # 문서 요약 도구에 넣는 원문 최대 글자 수
   summarize_chunk_chars: 3000          # 긴 원문을 나눠 요약할 때 한 조각의 글자 수
 
 search:
   max_results: 5
-  news_time_range: year                # 오래된 정보 방지: 뉴스는 최근 1년 우선
+  news_time_range: year                # 뉴스는 최근 1년 우선
   fallback_time_range: null            # 결과가 부족할 때만 기간 제한 해제
-  exclude_domains:                     # 출처 신뢰도가 낮은 개인 블로그·커뮤니티·주식 카페는 근거에서 제외
+  exclude_domains:                     # 블로그·커뮤니티·시세·유료 시장조사 홍보 페이지는 근거에서 제외
     [blog.naver.com, m.blog.naver.com, cafe.naver.com, tistory.com, brunch.co.kr, velog.io, medium.com,
      youtube.com, facebook.com, instagram.com, linkedin.com, namu.wiki, reddit.com, x.com, twitter.com,
-     finance.daum.net, fdatabot.com,        # 주가 시세 페이지, 로봇 판매업체의 경쟁사 목록 홍보 글
-     # 유료 시장조사 보고서 홍보 페이지: 출처마다 수치 편차가 크고 원문 확인이 안 됨 → 시장 수치는 공공 문서를 우선
+     finance.daum.net, fdatabot.com,
      imarcgroup.com, mordorintelligence.com, mordorintelligence.kr, gminsights.com, precedenceresearch.com,
      marketsandmarkets.com, fortunebusinessinsights.com, grandviewresearch.com, researchandmarkets.com,
      alliedmarketresearch.com, expertmarketresearch.com, globenewswire.com, openpr.com, einpresswire.com,
@@ -69,60 +68,57 @@ search:
      rootsanalysis.com, maximizemarketresearch.com, verifiedmarketresearch.com, databridgemarketresearch.com,
      coherentmarketinsights.com, marketresearch.com, futuremarketinsights.com, transparencymarketresearch.com,
      skyquestt.com, polarismarketresearch.com, zionmarketresearch.com, emergenresearch.com, stellarmr.com]
-  # 실시간 검색(캐시에 없는 검색)에만 쓰인다. 재현 실행(replay/)에는 영향 없음
-  timeout_sec: 30                      # 공급자 요청 1회 제한 시간(초). 없으면 응답 없는 연결에서 실행이 무한정 멈춘다
-  retries: 1                           # 일시 오류(연결 끊김·429·5xx)만 다시 시도하는 횟수. 인증·한도 오류(401·403·432·433)는 바로 실패
-  breaker_after: 3                     # 같은 공급자의 일시 오류가 연속 N번이면 이번 실행에서 그 공급자를 끈다 (인증·한도 오류는 1번에 끈다)
-  progress_every: 10                   # 실시간 검색 N회마다 진행 상황 한 줄 출력 (멈춘 것처럼 보이지 않게)
+  timeout_sec: 30                      # 공급자 요청 1회 제한 시간(초)
+  retries: 1                           # 일시 오류(연결 끊김·429·5xx) 재시도 횟수
+  breaker_after: 3                     # 같은 공급자가 연속 N번 실패하면 이번 실행에서 끈다
+  progress_every: 10                   # 실시간 검색 N회마다 진행 상황 출력
 
 workflow:
-  max_candidates_per_round: 18         # 한 번의 발굴 라운드에서 검증할 최대 후보 수 (= screen_kr + screen_global)
-  screen_kr: 12                        # 검증 슬롯 지역별 몫: 국내 12 + 해외 6. 평가 대기열도 같은 비율로 섞는다
-  screen_global: 6                     # (국내만 앞에 두면 해외 후보가 검증에 오지 못함). 한쪽이 모자라면 다른 쪽이 채운다
-  max_discovery_rounds: 2              # 후보가 바닥나면 발굴을 다시 도는 횟수 상한
-  max_evaluations: 10                  # 심층 평가(기술·시장·경쟁·판단)를 반복할 최대 스타트업 수
-  stop_on_invest: false                # 투자 추천이 나와도 멈추지 않고 평가 상한·후보 소진까지 평가 → 보고서는 투자 기준 통과 후보 중 배수 1위가 대상
-                                       # (평가한 후보 안에서는 순서가 결론을 바꾸지 않는다. true 면 노션 Graph(안)처럼 첫 투자 추천에서 보고서로)
-  calibrate: false                     # 보정 실행(app.py --calibrate): 상한까지 평가해 동종 기준 집단을 만들고, 보고서 노드는 렌더링하지 않음
-  recursion_limit: 100                 # 메인 그래프 recursion_limit (무한 루프 방지)
+  max_candidates_per_round: 18         # 발굴 라운드당 검증할 최대 후보 수 (= screen_kr + screen_global)
+  screen_kr: 12                        # 검증 슬롯 지역별 몫 (국내)
+  screen_global: 6                     # 검증 슬롯 지역별 몫 (해외)
+  max_discovery_rounds: 2              # 발굴 반복 상한
+  max_evaluations: 10                  # 심층 평가할 최대 스타트업 수
+  stop_on_invest: false                # true 면 첫 투자 추천에서 보고서로. false 면 상한까지 평가하고 배수 1위를 고른다
+  calibrate: false                     # 보정 실행(app.py --calibrate): 동종 기준 집단만 만들고 보고서는 쓰지 않음
+  recursion_limit: 100                 # 메인 그래프 recursion_limit
 
 decision:
-  # Payne Scorecard 의 비교 원리(동종 투자 유치 기업 평균 = 1.00). v1 의 100점 만점 규칙(70점)은 쓰지 않는다
-  method: payne_relative               # 6개 기준마다 동종 기준 집단 평균 대비 배수를 구해 가중합(M)
-  threshold: 1.00                      # 투자 ⇔ 배수 M 이 이 값을 '초과'. 1.00 = Payne 원 방법의 기준점 '투자를 받은 동종 평균 기업(100%)' — 새로 정한 숫자가 아님
+  # Payne Scorecard: 동종 투자 유치 기업 평균 = 1.00 대비 배수
+  method: payne_relative               # 6개 기준마다 동종 평균 대비 배수를 구해 가중합(M)
+  threshold: 1.00                      # 투자 ⇔ M > threshold
   step: 0.5                            # 기준별 배수 c = clip(1 + step × 평균(문항 신호 − 동종 평균 신호))
   clip: [0.5, 1.5]                     # 기준별 배수 c 의 하한·상한
-  founder_min_c: 1.00                  # 창업자 기준 비율 c_founder 가 이 값 이상이어야 투자 (팀이 동종 평균 이상). Payne: "A great team will fix early product flaws, but the reverse is not true"
+  founder_min_c: 1.00                  # 창업자 기준 배수가 이 값 이상이어야 투자
   reference_file: data/reference_class.json   # 동종 기준 집단 (app.py --calibrate 가 만든다)
-  reference_min_n: 5                   # 기준 집단이 이 수보다 작으면 동종 평균 신호를 0 으로 둔다(fallback)
-  sensitivity: [1.00, 1.05, 1.10, 1.15, 1.20]   # 기준 배수 민감도 (배수마다 결정을 기록)
-  flip_max_items: 3                    # 뒤집힘 조건(미확인 → YES 로 바뀌면 투자)에 쓰는 최대 문항 수
-  dd_max_items: 5                      # 실사 항목(투자 전에 회사에 확인할 질문) 최대 수
+  reference_min_n: 5                   # 기준 집단이 이 수보다 작으면 동종 평균 신호를 0 으로 둔다
+  sensitivity: [1.00, 1.05, 1.10, 1.15, 1.20]   # 기준 배수 민감도
+  flip_max_items: 3                    # 뒤집힘 조건(미확인 → YES 면 투자)에 쓰는 최대 문항 수
+  dd_max_items: 5                      # 실사 항목 최대 수
 
-roi:                                   # ROI 참고치 (점수에는 쓰지 않음. 가정 값은 보고서에 '가정'으로 표기)
-  fx_krw_per_usd: 1400                 # 원화 라운드 금액 → 달러 환산 가정
-  stake_assumption: [0.10, 0.20]       # 라운드 투자자 지분율 가정 → post-money = 라운드 금액 ÷ 지분율
-  target_multiple: 10                  # VC Method 목표 회수 배수 → 필요 Exit = post-money × 배수
-  stage_median_usd_m: {Seed: 1, Pre-A: 1, Series A: 7, Pre-B: 7, Series B: 14, Pre-C: 14, Series C: 14}   # 단계별 라운드 금액 중앙값($M). Pre-X 는 앞 단계 값(가정)
+roi:                                   # ROI 참고치 (점수에는 쓰지 않음)
+  fx_krw_per_usd: 1400                 # 원화 → 달러 환산 가정
+  stake_assumption: [0.10, 0.20]       # 라운드 투자자 지분율 가정
+  target_multiple: 10                  # VC Method 목표 회수 배수
+  stage_median_usd_m: {Seed: 1, Pre-A: 1, Series A: 7, Pre-B: 7, Series B: 14, Pre-C: 14, Series C: 14}   # 단계별 라운드 금액 중앙값($M)
   stage_median_source: "AgFunder(2026) p.13, 2025 agrifoodtech median deal size by stage"
 
 report:
   max_pages: 5
-  summary_max_chars: 560               # SUMMARY 글자 수 상한 (A4 절반 이내는 렌더링 후 높이로 따로 검증)
+  summary_max_chars: 560               # SUMMARY 글자 수 상한
   output_dir: outputs
-  scenario: false                      # 시나리오 실행(app.py --out DIR): 제출용 파일(RAG-Output_…)을 만들지 않음
-  max_rewrites: 2                      # 조판 밀도 초과 시 보고서 축약 재작성 상한
-  run_cost_usd: 0.6                    # 새로 평가할 때 1회 LLM 비용(gpt-4.1-mini, 심층 평가 10곳 실측 약 $0.58) — README 표기용
+  scenario: false                      # --out 실행: 제출용 파일을 만들지 않음
+  max_rewrites: 2                      # 보고서 재작성 상한
+  run_cost_usd: 0.6                    # 1회 실행 LLM 비용 (참고용)
 
 cache:
-  dir: replay                          # 제출본 재현용 캐시 (검색 결과·발굴 스냅샷·LLM 응답을 저장소에 포함)
-                                       # --fresh 로 실행하면 cache_fresh/ 에 새로 수집한다
-  llm: true                            # 같은 입력의 LLM 호출은 SQLite 캐시 재사용
-  search: true                         # 같은 쿼리의 웹 검색 결과 재사용
-  embeddings: true                     # 문서 임베딩 캐시 (재색인 비용 방지)
+  dir: replay                          # 캐시 폴더 (--fresh 면 cache_fresh/)
+  llm: true                            # LLM 응답 캐시
+  search: true                         # 웹 검색 결과 캐시
+  embeddings: true                     # 문서 임베딩 캐시
 
 submission:                            # 제출 파일명: RAG-Output_{campus}-{class}_{이름 가나다순}.pdf
-  campus: "울산"                        # SKALA 울산캠퍼스
+  campus: "울산"
   class: "2반"
   team: "1조"
   members: [김가연, 김진녕, 문지후, 이준희, 정승우]

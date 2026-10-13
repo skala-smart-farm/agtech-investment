@@ -1,10 +1,7 @@
-"""그래프 전체가 공유하는 State (에이전트 사이의 인터페이스 규격).
+"""그래프 전체가 공유하는 State.
 
-- 노드는 바뀐 키만 반환한다. 다음 노드가 이어 써야 하는 키에만 Reducer 를 붙이고, 나머지는 덮어쓴다.
-- 후보별 분석 결과(founder/tech/market/competition/scorecard)는 새 후보를 꺼낼 때(탐색의 pick 단계) {} 로 초기화한다.
-- 키마다 끝 주석은 '설명  [쓰는 노드 → 읽는 노드]' 형식이다. 설계서 State 표가 이 주석을 읽으므로 키는 한 줄에 하나씩 둔다.
-- DiscoveryIn/DiscoveryOut 은 🔍 탐색 서브그래프의 입력·출력 규격이다. 입력에 누적 키(screened·log·rag_traces)를 넣지 않아
-  서브그래프는 새 기록만 돌려주고, 부모 Reducer 가 중복 없이 붙인다.
+- 누적해야 하는 키에만 Reducer 를 붙이고 나머지는 덮어쓴다.
+- 키 끝 주석 형식: '설명  [쓰는 노드 → 읽는 노드]'
 """
 from __future__ import annotations
 
@@ -31,7 +28,7 @@ class InvestmentState(TypedDict, total=False):
 
     registry: Annotated[dict, merge_dict]              # 근거 저장소 {근거 id: 문서·웹 메타데이터}, id → REFERENCE  [전 에이전트 → 전 에이전트·report]
 
-    # ── 🔍 스타트업 탐색 (서브그래프: collect 발굴 → screen 적격성 관문 → pick 선택 / exhausted 소진)
+    # ── 스타트업 탐색
     discovery_rounds: int                              # 발굴 라운드 수 (max_discovery_rounds 로 제한)  [discover.collect → discover 라우터]
     raw_candidates: list[dict]                         # 이번 라운드 발굴 후보 (이름, 분야, 발굴 채널, 근거 id)  [discover.collect → discover.screen]
     seen: Annotated[list[str], add_unique]             # 이미 다룬 후보의 정규화 이름 (중복 발굴 방지)  [discover.collect → discover.collect]
@@ -40,14 +37,14 @@ class InvestmentState(TypedDict, total=False):
     current: dict | None                               # 평가 대상 프로필 (단계·라운드·금액·대표·설립일·국민연금), None = 후보 소진  [discover.pick·exhausted → 분석 에이전트·decide]
     iterations: int                                    # 심층 평가한 후보 수 (max_evaluations 로 제한)  [discover.pick → 라우터]
 
-    # ── 분석 에이전트 (1 에이전트 = 1 Scorecard 기준, 결과에 criterion 판정 포함)
+    # ── 분석 에이전트
     founder: dict                                      # 창업 시점 t0·인물(창업 전 경력)·마일스톤·고용 추이·창업자 기준 판정  [founder → decide·report]
     tech: dict                                         # 제품·핵심 기술·장단점·차별점 주장(claims)·기술 기준선·제품/기술력 판정  [tech → market·competition·decide·report]
     market: dict                                       # 시장 규모(수치·연도·출처)·성장·수요·정책·시장성 판정  [market → decide·report]
     competition: dict                                  # 경쟁사 비교표·차별점 검증·경쟁 우위 판정  [competition → decide·report]
     market_cache: Annotated[dict, merge_dict]          # 세부 분야별 시장 분석 캐시 (같은 분야 재분석 방지)  [market → market]
 
-    # ── 🧮 투자 판단과 반복 제어
+    # ── 투자 판단
     scorecard: dict                                    # 6개 기준 비교율·배수 M·결정·보류 유형·뒤집힘·실사·ROI·민감도·순위  [decide → report(evaluations 사본)]
     decision: str                                      # 이번 후보의 결정: '투자' 또는 '보류'  [decide → 라우터]
     evaluations: Annotated[list[dict], operator.add]   # 후보별 평가 누적 (보고서 비교표·보류 사유의 재료)  [decide → report]
@@ -60,7 +57,7 @@ class InvestmentState(TypedDict, total=False):
 
 
 class DiscoveryIn(TypedDict, total=False):
-    """🔍 탐색 서브그래프 입력 규격. 누적 키(screened·log·rag_traces·evaluations)는 넣지 않는다."""
+    """탐색 서브그래프 입력. 누적 키를 넣지 않아 부모 Reducer 가 같은 기록을 두 번 붙이지 않는다."""
     domain: str
     run_date: str
     registry: Annotated[dict, merge_dict]
@@ -71,7 +68,7 @@ class DiscoveryIn(TypedDict, total=False):
 
 
 class DiscoveryOut(TypedDict, total=False):
-    """🔍 탐색 서브그래프 출력 규격. 누적 키는 서브그래프 안에서 새로 생긴 항목만 담긴다."""
+    """탐색 서브그래프 출력."""
     registry: Annotated[dict, merge_dict]
     discovery_rounds: int
     raw_candidates: list[dict]

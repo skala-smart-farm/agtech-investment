@@ -1,10 +1,8 @@
-"""구조화된 발굴 채널 (키 불필요, 날짜가 정확한 공개 데이터).
+"""구조화된 발굴 채널 (키 불필요).
 
-- TIPS 창업기업 공개 목록: 대표자·설립일·선정연도·운영사(=선투자자)가 필드로 있다.
-  TIPS 는 운영사가 먼저 투자해야 선정되므로, 선정 자체가 "Seed 급 투자를 받은 회사"라는 신호다.
-- 와우테일 '애그테크' 카테고리 (WordPress REST): 투자 유치 기사의 정확한 게시일을 준다.
-둘 다 날짜별 스냅샷을 캐시에 저장해 같은 날 다시 실행하면 같은 입력을 쓴다(재현성).
-수집 대상 사이트의 robots·차단 정책을 우회하지 않으며, 요청 사이에 간격을 둔다.
+- TIPS 창업기업 공개 목록: 선정 자체가 Seed 급 투자를 받았다는 신호
+- 와우테일 '애그테크' 카테고리: 투자 유치 기사와 정확한 게시일
+둘 다 날짜별 스냅샷을 캐시에 저장한다.
 """
 from __future__ import annotations
 
@@ -29,7 +27,7 @@ FUNDING = re.compile(r"투자\s?유치|시드|프리\s?A|시리즈|브릿지|팁
 
 
 def _snapshot(name: str):
-    """같은 캐시 폴더에 이전 스냅샷이 있으면 그것을 쓴다 (제출본 재현). 없으면 오늘 날짜로 새로 받는다."""
+    """캐시 폴더에 스냅샷이 있으면 그것을, 없으면 새로 받는다."""
     d = path(f"{get_config().cache.dir}/snapshots/.keep").parent
     old = sorted(d.glob(f"{name}_*.json"))
     return old[-1] if old else d / f"{name}_{datetime.now():%Y%m%d}.json"
@@ -78,8 +76,7 @@ def _tips_index(snapshot) -> dict[str, list[dict]]:
 
 
 def tips_profile(names: list[str]) -> dict | None:
-    """TIPS 목록에서 이름이 같은 농업 분야 기업의 대표자·설립일(estDt, YYYY-MM-DD).
-    발굴 단계가 받아 둔 스냅샷만 쓰고 새로 받지 않는다. 스냅샷이 없거나 동명 기업이 둘 이상이면 None."""
+    """TIPS 스냅샷에서 같은 이름 농업 기업의 대표자·설립일. 없거나 동명 기업이 둘 이상이면 None."""
     f = _snapshot("tips")
     if not f.exists():
         return None
@@ -120,7 +117,7 @@ def wowtale_agtech_funding(since_days: int = 730) -> list[dict]:
     for p in posts:
         title = html.unescape(p["title"]["rendered"])
         d = p["date"][:10]
-        # 평가 기준일 이후 글(음수 일수)은 최근 2년에 넣지 않는다 (core/recency.py 와 같은 규칙)
+        # 평가 기준일 이후 글은 제외
         if FUNDING.search(title) and 0 <= (now - datetime.fromisoformat(d)).days <= since_days:
             out.append({"title": title, "date": d, "url": p["link"]})
     return out

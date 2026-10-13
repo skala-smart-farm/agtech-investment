@@ -32,12 +32,12 @@ class STEmbeddings(Embeddings):
 
     @property
     def model(self):
-        """처음 인코딩할 때 불러온다. 재현용 캐시(색인·질의 임베딩)만으로 실행하면 모델(약 2GB)을 받지 않는다."""
+        """처음 인코딩할 때 모델을 불러온다."""
         if self._model is None:
             import torch
             from sentence_transformers import SentenceTransformer
 
-            # transformers v5 는 저장된 dtype(fp16/bf16)으로 불러와 CPU 에서 10배 이상 느려질 수 있어 fp32 로 고정
+            # CPU 에서 느려지지 않게 fp32 로 고정
             self._model = SentenceTransformer(self.model_name, device=_device(), model_kwargs={"dtype": torch.float32})
             if self.max_seq_length and self._model.max_seq_length > self.max_seq_length:
                 self._model.max_seq_length = self.max_seq_length  # 조각이 800자라 1024 토큰이면 충분

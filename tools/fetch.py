@@ -1,10 +1,4 @@
-"""기사 본문 직접 수집 (키 불필요).
-
-검색 API 는 스니펫(수백 자)만 주거나 게시일이 틀린 경우가 있다. 이미 확보한 근거 URL 의 원문을 받아
-본문(창업자 이력·실적·파트너 계약처럼 스니펫에 잘 안 나오는 사실)과 원문 게시일을 근거에 채운다.
-- 결과는 재현용 캐시에 저장한다(실패도 표시해 재현 때 같은 결과).
-- robots·봇 차단으로 막힌 사이트(기업 DB 등)는 받지 않는다.
-"""
+"""기사 원문 수집. 검색 스니펫에 없는 본문과 원문 게시일을 근거에 채운다 (결과는 캐시에 저장)."""
 from __future__ import annotations
 
 import hashlib
@@ -27,7 +21,7 @@ def _cache(url: str):
 
 
 def cached(url: str) -> dict | None:
-    """이미 받아 둔 원문(재현용 캐시)만 읽는다. 네트워크는 쓰지 않는다. 없거나 실패 기록이면 None."""
+    """캐시에 받아 둔 원문만 읽는다. 없거나 실패 기록이면 None."""
     if not (url or "").startswith("http"):
         return None
     f = _cache(url)
@@ -38,8 +32,7 @@ def cached(url: str) -> dict | None:
 
 
 def fetch(url: str) -> dict | None:
-    """원문 본문·게시일·제목. 실패하면 None (실패도 캐시해 재현 때 같은 결과).
-    제목은 검색 결과 제목이 "..." 로 잘렸을 때 REFERENCE 에 쓴다 (예전 캐시에는 없음)."""
+    """원문 본문·게시일·제목. 실패하면 None (실패도 캐시)."""
     host = url.split("/")[2].lower() if url.count("/") >= 2 else ""
     if not url.startswith("http") or url.lower().endswith(".pdf") or host.endswith(SKIP):
         return None

@@ -1,7 +1,4 @@
-"""LLM 토큰 사용량·비용 집계. LangSmith 없이도 실행마다 비용을 기록한다.
-
-캐시(SQLite)에서 꺼낸 응답은 실제 API 호출이 아니므로 비용에 넣지 않는다(llm_output 이 없으면 캐시 응답).
-"""
+"""LLM 토큰 사용량·비용 집계. 캐시에서 꺼낸 응답은 비용에 넣지 않는다."""
 from __future__ import annotations
 
 import threading
@@ -12,9 +9,7 @@ from core.config import get_config
 
 
 def model_price(model: str) -> tuple[float, float]:
-    """모델 이름 → (입력, 출력) USD / 100만 토큰. 가격표는 config.yaml 의 models.price_per_mtok 에만 둔다.
-    응답의 모델명에 날짜가 붙어도(…-2025-04-14) 가장 길게 일치하는 앞부분으로 찾고, 표에 없으면 생성 모델 가격으로 계산한다.
-    프롬프트 캐시로 처리된 입력은 호출하는 쪽에서 입력 가격의 1/4 로 계산한다."""
+    """모델 이름 → (입력, 출력) USD / 100만 토큰 (config.yaml models.price_per_mtok)."""
     models = get_config().models
     table = models.get("price_per_mtok") or {}
     hit = max((k for k in table if model.startswith(k)), key=len, default=None)

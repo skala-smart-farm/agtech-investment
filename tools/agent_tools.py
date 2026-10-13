@@ -1,19 +1,10 @@
-"""목적별 도구 정의 (LangChain @tool). 실습 목표 '외부 정보 검색, 문서 요약 등의 목적에 맞는 도구 정의'에 해당한다.
+"""에이전트가 쓰는 도구 3개 (LangChain @tool).
 
-계약 C4. make_tools(reg, agent) 가 돌려주는 도구 3개:
-- search_documents(query: str)
-    문서 코퍼스(PDF) 하이브리드 검색. response_format='content_and_artifact' — content 는 LLM 이 읽을 조각 목록,
-    artifact 는 [{'text', 'meta'}] (근거 등록은 RAG generate 단계가 한다).
-- web_search(query: str, recent: bool = True)
-    외부 정보 검색. tools.web_search.web_search 로 결과를 reg 에 근거로 등록하고,
-    content_and_artifact 로 요약 목록과 [근거 id] 를 돌려준다. recent=True 면 최근 1년 뉴스 우선.
-- summarize_document(source: str, focus: str) -> str
-    문서 요약. source 는 근거 id 또는 URL. focus 관점으로 요약하고 끝에 [근거 id] 를 붙인다. 실패하면 빈 문자열.
-    LLM 에 바인딩하지 않고 기술 요약 에이전트가 코드에서 직접 부른다(홈페이지 요약, 실패하면 기사 본문 근거 요약).
+- search_documents(query): 문서 코퍼스(PDF) 하이브리드 검색
+- web_search(query, recent): 웹·뉴스 검색, 결과를 근거 저장소에 등록
+- summarize_document(source, focus): 근거 id 또는 URL 의 원문 요약 (LLM 에 바인딩하지 않고 코드에서 직접 부름)
 
-도구의 이름·설명(docstring)·인자는 Agentic RAG agent 노드가 bind_tools 로 LLM 에 알려 주는 내용이다(LLM 캐시 키에 들어감).
-agent 노드는 search_documents·web_search 둘만 바인딩하고, 고른 도구의 실행은 RAG 노드가 같은 근거 저장소로 한다.
-reg 는 하나의 SourceRegistry 객체를 클로저로 잡아 제자리에서 갱신한다(복사본을 만들지 않음).
+도구의 docstring 은 LLM 에 그대로 전달되는 설명이다.
 """
 from __future__ import annotations
 
@@ -49,7 +40,7 @@ def make_tools(reg: SourceRegistry, agent: str) -> dict[str, BaseTool]:
             for i, c in enumerate(chunks))
         return listing or "검색 결과 없음", chunks
 
-    # 설명의 코퍼스 규모(문서 수·쪽수·발행 연도)는 data/manifest.yaml 에서 계산해 넣는다 (코퍼스를 바꾸면 저절로 맞음)
+    # 코퍼스 규모는 data/manifest.yaml 에서 계산해 넣는다
     search_documents.__doc__ = search_documents.__doc__.replace("{corpus}", corpus_summary())
     search_documents = tool(response_format="content_and_artifact", parse_docstring=True)(search_documents)
 
@@ -77,7 +68,7 @@ def make_tools(reg: SourceRegistry, agent: str) -> dict[str, BaseTool]:
         """
         try:
             return summarize(reg, agent, source, focus)
-        except Exception as e:  # 도구 실패가 에이전트를 멈추지 않게 (재현 모드의 캐시 없는 호출 포함)
+        except Exception as e:  # 도구 실패가 에이전트를 멈추지 않게
             print(f"   (문서 요약 실패, 빈 결과로 진행: {source[:60]} — {str(e)[:80]})")
             return ""
 
@@ -85,9 +76,7 @@ def make_tools(reg: SourceRegistry, agent: str) -> dict[str, BaseTool]:
 
 
 def summarize(reg: SourceRegistry, agent: str, source: str, focus: str) -> str:
-    """summarize_document 의 본체. URL 이면 원문을 받아(tools.fetch 캐시) 근거로 등록하고, 근거 id 면 등록된 본문을 읽는다.
-    원문을 tools.summarize_max_chars 로 자르고 summarize_chunk_chars 단위로 나눠 앞 2조각까지 요약해 합친다.
-    읽을 원문이 없으면 빈 문자열."""
+    """summarize_document 본체. URL 이면 원문을 받아 근거로 등록하고, 근거 id 면 등록된 본문을 요약한다."""
     cfg = get_config().tools
     source = (source or "").strip()
     if source.startswith("http"):

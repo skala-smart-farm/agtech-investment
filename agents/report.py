@@ -1,16 +1,11 @@
-"""📝 보고서 생성 에이전트 (노드 report).
+"""보고서 생성 에이전트 (노드 report).
 
-앞 단계 결과(탐색·창업자·기술·시장·경쟁·투자 판단)를 장마다 연결해 5쪽 이내 PDF 로 만들고, 과제 형식을 코드로 검사한다.
-- 모드: invest(투자 추천 후보 있음 → A안) / hold(평가한 후보 모두 보류 → B안) / none(적격 후보 0 → C안)
-  / calibrate(보정 실행 → 렌더링 없이 모드만 반환)
-- A안 본문 5개 장 = 과제 '보고서 주요 내용' 5항목: 사업 아이디어(·기술·경쟁 차별성) / 시장 규모 / 팀의 구성 /
-  투자 판단과 사업 리스크 / 한계점. B안은 후보마다 '왜 안 되는지'와 '무엇이 확인되면 되는지'로 구성한다
-- SUMMARY 5줄: 상황 → 결론 → 근거(→n장) → 리스크·원인 → 요청('~할까요?'). 상황·결론·요청 줄과 '(→n장)'은 코드가,
-  근거·리스크 구절은 LLM 이 쓴다. 개요 문장 금지, A4 절반 이내(렌더링 후 높이 측정)
-- 표·점수·순위·ROI·뒤집힘 조건·실사 항목은 코드가 State(evaluations 의 scorecard)에서 만든다. LLM 은 문장 칸만 채운다
-- 본문이 평가표와 어긋나면(예: 특허 문항이 미확인인데 "특허 보유", C2 가 YES 가 아닌데 "앞선다") 이유를 붙여 다시 쓰게 한다
-- REFERENCE: 본문에 실제로 인용된 근거만, 기관 보고서 / 학술 논문 / 웹페이지 형식. 같은 자료(포털 전재본 포함)는 한 번만
-- 5쪽을 넘으면 조판 밀도를 높이고, 그래도 넘으면 줄여 쓴다
+앞 단계 결과를 장마다 연결해 PDF 로 만들고, 형식을 코드로 검사한다.
+- 모드: invest(투자 추천 후보 있음 → A안) / hold(모두 보류 → B안) / none(적격 후보 없음 → C안) / calibrate(렌더링 없음)
+- SUMMARY 5줄: 상황 → 결론 → 근거 → 리스크·원인 → 요청. 상황·결론·요청 줄은 코드가, 근거·리스크 구절은 LLM 이 쓴다.
+- 표·점수·순위·ROI 는 코드가 State 에서 만들고, LLM 은 문장 칸만 채운다.
+- 본문이 평가표와 어긋나면 이유를 붙여 다시 쓰게 한다.
+- REFERENCE: 본문에 실제로 인용된 근거만. 쪽수를 넘으면 조판 밀도를 높이고, 그래도 넘으면 줄여 쓴다.
 """
 from __future__ import annotations
 
@@ -36,11 +31,11 @@ from tools.sources import (ACCESS_DATE_NOTE, GROUPS, REFERENCE_FORMATS, SourceRe
 
 AGENT = "report"
 CITE = re.compile(r"\[\s*([WD][0-9a-f]{5,8}(?:\s*[,，]\s*[WD][0-9a-f]{5,8})*)\s*\]")
-PAREN_CITE = re.compile(r"\(\s*([WD][0-9a-f]{5,8}(?:\s*[,，]\s*[WD][0-9a-f]{5,8})*)\s*\)")  # LLM 이 (W1a2b3) 로 쓴 인용
+PAREN_CITE = re.compile(r"\(\s*([WD][0-9a-f]{5,8}(?:\s*[,，]\s*[WD][0-9a-f]{5,8})*)\s*\)")
 NUM_CITE = re.compile(r"\[(\d+(?:, \d+)*)\]")  # 번호로 바뀐 본문 인용
 CHAPTER_REF = re.compile(r"\(→\s*([\d·,\s]+)장\)")
 
-# 장 제목 (고정 문자열, 형식 검사 대상). 과제 '보고서 주요 내용' 5항목이 장 제목(A안)이나 소제목(B안)에 들어간다
+# 장 제목 (형식 검사 대상)
 A_CHAPTERS = ("SUMMARY", "1. 사업 아이디어(핵심 컨셉)·기술·경쟁 차별성", "2. 시장 규모와 성장성",
               "3. 팀의 구성(핵심 창업자·기술 역량)", "4. 투자 판단과 사업 리스크", "5. 한계점", "REFERENCE")
 B_CHAPTERS = ("SUMMARY", "1. 후보 풀과 선정 과정", "2. 후보별 보류 사유", "3. 최고점 후보 상세", "4. 투자 판단 요약",
@@ -52,17 +47,16 @@ REQUIRED_ITEMS = ("사업 아이디어", "사업 리스크", "시장 규모", "�
 
 
 def _design_threshold() -> float:
-    """설계서 C.4 에 고정한 투자 기준 배수 = config.yaml 파일의 값. 시나리오 실행(--threshold)은 메모리의 설정만 바꾸므로
-    파일을 다시 읽어 '설계 기준'과 '이번 실행 기준'을 구분한다."""
+    """config.yaml 파일의 투자 기준 배수 (--threshold 로 바꾼 이번 실행 값과 구분)."""
     with open(ROOT / "config.yaml", encoding="utf-8") as f:
         return float(yaml.safe_load(f)["decision"]["threshold"])
-# 이 말이 있는 줄(ROI 수치)에는 '가정' 표기가 있어야 한다 ('유료 전환율'의 '환율'은 제외)
+# 이 말이 있는 줄(ROI 수치)에는 '가정' 표기가 있어야 한다
 ASSUMPTION_TERMS = re.compile(r"(?<!전)환율|지분율|post-money|필요 Exit|회수 배수")
 STAGE_ORDER = ("Seed", "Pre-A", "Series A", "Pre-B", "Series B", "Pre-C", "Series C")
 
 
 def _fix_cites(x):
-    """초안 전체에서 소괄호 인용 (W1a2b3) 을 대괄호 [W1a2b3] 로 바꾼다 (검사·번호 매기기가 대괄호만 알아보므로)."""
+    """소괄호 인용 (W1a2b3) 을 대괄호 [W1a2b3] 로 바꾼다."""
     if isinstance(x, str):
         return PAREN_CITE.sub(r"[\1]", x)
     if isinstance(x, list):
@@ -73,22 +67,22 @@ def _fix_cites(x):
 
 
 BANNED = ["본 보고서", "이 보고서", "보고서는", "보고서에서", "보고서의 목적", "판단하는 보고서", "평가하는 보고서",
-          "목적으로 작성", "살펴보", "다음과 같", "개요", "소개하", "UNKNOWN", "이 장에서", "본 장"]  # UNKNOWN 은 내부 용어 → "미확인"
+          "목적으로 작성", "살펴보", "다음과 같", "개요", "소개하", "UNKNOWN", "이 장에서", "본 장"]
 EVALUATIVE = ["우수", "탁월", "뛰어난", "선도적", "독보적", "혁신적인", "압도적"]
 # 평가표에서 확인되지 않은 사실을 본문이 단정하는지 찾는 규칙: (문항, 패턴, 설명)
 CLAIMS = [
     ("C1", r"특허[^.。\n]{0,15}(보유|확인|등록|출원|확보)", "특허"),
-    ("R1", r"매출[^.。\n]{0,12}(\d[\d,.]*\s*(억|만|천|원|달러|%)|기록|달성)", "매출"),  # "제3자" 같은 숫자는 제외
+    ("R1", r"매출[^.。\n]{0,12}(\d[\d,.]*\s*(억|만|천|원|달러|%)|기록|달성)", "매출"),
     ("R2", r"(유료 고객|고객 수|설치 농가|도입 농가)[^.。\n]{0,12}\d[\d,.]*\s*(곳|명|개|농가|호|대|ha|㎡|%|만|천|억)",
      "고객·설치 규모"),
     ("P4", r"(인허가|검정|인증)[^.。\n]{0,10}(획득|취득|받았|완료)", "인허가·검정"),
     ("C2", r"차별화(된다|되어 있|를 갖|했다)|경쟁 우위(를|가)? ?(확보|갖)", "경쟁사 대비 차별성"),
     ("P1", r"상용 (운영|판매)[^.。\n]{0,6}(중이|하고 있)", "상용 운영"),
 ]
-NEGATION = re.compile(r"않|불가|미확인|없|못|필요|여부|되면|이면|하면|경우|예정|계획")  # 부정·조건(재검토 조건)은 단정이 아니다
+NEGATION = re.compile(r"않|불가|미확인|없|못|필요|여부|되면|이면|하면|경우|예정|계획")
 SUPERIORITY = re.compile(r"앞선다|앞서 있|우위|차별화된다|차별화되어")  # C2 가 YES 가 아니면 우열 단정 금지
-SUP_NEGATION = re.compile(r"않|없|미확인|불가|못|확인되지")  # 우열 단정을 부정하는 말만 (조건·필요는 면제하지 않음)
-# 판정 단계의 내부 기록(강등 사유)을 임원이 읽을 짧은 이유로 바꾼다
+SUP_NEGATION = re.compile(r"않|없|미확인|불가|못|확인되지")
+# 판정 단계의 강등 사유 → 보고서용 짧은 이유
 DEMOTED = {"인용문이 근거 본문에서 확인되지 않음": "근거 원문에서 해당 내용이 확인되지 않음",
            "인용 주변": "근거가 이 회사가 아닌 업계 일반 내용임",
            "공공·연구기관 문서 근거 없음": "공공·연구기관 문서 근거 없음",
@@ -168,17 +162,17 @@ def _s100(m: float | None) -> str:
 
 
 def _s1(m: float | None) -> str:
-    """배수 → 소수 한 자리 표기 (결론 줄: 기준과 가까운 값이 반올림으로 기준과 같아 보이지 않게, 예 1.096 → 109.6)."""
+    """배수 → 소수 한 자리 표기 (예 1.096 → 109.6)."""
     return "-" if m is None else f"{m * 100:.1f}"
 
 
 def _p100(pct: float | None) -> str:
-    """기준별 점수(투자 판단 에이전트가 c_d × 100 으로 준 값) → 보고서 표기. _s100 과 달리 다시 곱하지 않는다."""
+    """기준별 점수(이미 × 100 된 값) → 보고서 표기."""
     return "-" if pct is None else f"{pct:.1f}"
 
 
 def _num(x) -> str:
-    """숫자는 불필요한 소수점 없이, 숫자가 아니면 그대로 (분석 에이전트 출력 형식이 달라도 보고서가 멈추지 않게)."""
+    """숫자는 불필요한 소수점 없이, 숫자가 아니면 그대로."""
     return f"{x:g}" if isinstance(x, (int, float)) else str(x)
 
 
@@ -193,9 +187,7 @@ def _bare(x: str) -> str:
 
 
 def _reference_gap(evals: list[dict]) -> dict | None:
-    """이번에 평가한 후보 중 동종 기준 집단(data/reference_class.json)에 없는 곳. 새 데이터로 평가(--fresh)하면서
-    같은 캐시로 --calibrate 를 먼저 돌리지 않으면 동종 평균·순위가 이번 평가가 아니라 예전 기준 집단 기준이 된다.
-    제출 실행은 평가 10곳 = 기준 집단 10곳이라 None."""
+    """이번에 평가한 후보 중 동종 기준 집단에 없는 곳 (없으면 None)."""
     from agents.decision import _read_json, _ref_path
 
     data = _read_json(_ref_path()) or {}
@@ -207,8 +199,7 @@ def _reference_gap(evals: list[dict]) -> dict | None:
 
 
 def _pick_target(evals: list[dict]) -> tuple[list[dict], list[dict], dict]:
-    """(투자 기준 통과 후보, 배수 순 전체, 보고서 대상). 대상은 투자 기준 통과 후보 중 배수 1위 — 평가 순서와 무관,
-    통과 후보가 없으면 배수 1위(모두 보류 보고서)."""
+    """(투자 기준 통과 후보, 배수 순 전체, 보고서 대상). 대상은 통과 후보 중 배수 1위, 없으면 전체 배수 1위."""
     invested = [e for e in evals if e["decision"] == "투자"]
     ranked = sorted(evals, key=lambda e: -e["scorecard"]["multiplier"])
     target = next(e for e in ranked if e["decision"] == "투자") if invested else ranked[0]
@@ -230,7 +221,7 @@ def _pool(state: dict, evals: list[dict], screened: list[dict], cfg) -> dict:
     left = [r for r in eligible if not any(_same(r.get("official_name") or r["name"], n) or _same(r["name"], n)
                                            for n in done)]
     capped = state.get("end_reason") == "max_evaluations" or len(evals) >= cfg.workflow.max_evaluations
-    if state.get("end_reason") == "invest_found":  # workflow.stop_on_invest=true 일 때만
+    if state.get("end_reason") == "invest_found":
         why = "투자 추천 후보가 나와 평가를 멈춤"
     elif capped:
         why = f"평가 상한({cfg.workflow.max_evaluations}곳, 비용 관리) 도달"
@@ -328,7 +319,7 @@ def _maturity_problems(text: str, p1: str | None) -> list[str]:
 
 
 def _stale_forecasts(text: str, run_date: str) -> list[str]:
-    """이미 지난 기간의 전망('2025년 … 전망')을 미래처럼 쓴 문장. '(2022년 발표 전망)'처럼 발표 시점을 밝히면 허용."""
+    """이미 지난 기간의 전망을 미래처럼 쓴 문장."""
     year, out = int(run_date[:4]), []
     for sent in re.split(r"(?<=[.。])\s+|(?<=다)\s+|\n", CITE.sub("", text)):
         if "발표" in sent or re.search(r"확인 불가|미확인", sent):
@@ -343,7 +334,7 @@ def _stale_forecasts(text: str, run_date: str) -> list[str]:
 
 
 def _rejected_yes(e: dict) -> list[dict]:
-    """판정 단계에서 원문 확인에 실패해 기각된 주장 (투자 판단 scorecard 와 분석 에이전트 criterion 모두)."""
+    """판정 단계에서 원문 확인에 실패해 기각된 주장."""
     sc = e.get("scorecard") or {}
     out = list(sc.get("rejected_yes") or [])
     for k in ("founder", "tech", "market", "competition"):
@@ -356,7 +347,7 @@ def _consistency_problems(draft: _Body, target: dict, evals: list[dict], run_dat
     verdict = {r["qid"]: r["answer"] for r in target["scorecard"]["rows"]}
     body = [draft.problem, draft.product, draft.revenue_model, draft.market, draft.team, draft.industry_baseline,
             draft.competition]
-    tables = [c.vs_target for c in draft.competitor_notes] + [r.content for r in draft.risks]  # 실사 질문 칸은 확인할 일이라 제외
+    tables = [c.vs_target for c in draft.competitor_notes] + [r.content for r in draft.risks]
     notes = ""
     if isinstance(draft, Draft):
         head = [draft.ev_tech, draft.ev_market, draft.ev_team, draft.risk_line, draft.lead_idea, draft.lead_market,
@@ -366,7 +357,7 @@ def _consistency_problems(draft: _Body, target: dict, evals: list[dict], run_dat
         probs += [f"장 결론에 금지 표현 '{b}'" for b in BANNED if b in " ".join(head[4:])]
     else:
         head = [draft.common_cause, draft.common_detail]
-        probs = _claim_problems("\n".join(body + tables), verdict)  # 최고점 후보 상세(3장)는 그 후보의 평가표로
+        probs = _claim_problems("\n".join(body + tables), verdict)
         verdicts = {e["name"]: {r["qid"]: r["answer"] for r in e["scorecard"]["rows"]} for e in evals}
         # 후보 이름이 없는 공통 원인 문장은 한 후보라도 YES 면 허용
         any_yes = {q: "YES" for v in verdicts.values() for q, a in v.items() if a == "YES"}
@@ -386,11 +377,11 @@ def _consistency_problems(draft: _Body, target: dict, evals: list[dict], run_dat
         notes = "\n".join(n.why_not for n in draft.candidates)
     text = "\n".join(head + body + tables)
     probs += _stale_forecasts(f"{text}\n{notes}", run_date)
-    for rj in _rejected_yes(target):  # 판정 단계에서 원문 확인에 실패해 기각된 주장이 다시 나오면 안 된다
+    for rj in _rejected_yes(target):
         q = norm(rj.get("quote", ""))
         if len(q) >= 15 and q[:15] in norm(f"{text}\n{notes}"):
             probs.append(f"판정 단계에서 기각된 주장('{rj['quote'][:30]}…')을 쓰지 마라")
-    plain = re.sub(r"우수기업|우수 기업|우수벤처|우수 벤처", "", f"{text}\n{notes}")  # 공식 프로그램 이름은 평가성 표현이 아니다
+    plain = re.sub(r"우수기업|우수 기업|우수벤처|우수 벤처", "", f"{text}\n{notes}")
     probs += [f"평가성 표현 '{w}' 대신 사실과 판정 근거로 써라" for w in EVALUATIVE if w in plain]
     if not re.search(r"\[[^\]]*D[0-9a-f]{5,8}", draft.market):
         probs.append("시장 수치에 공공·연구기관 문서([D..]) 인용이 없다")
@@ -406,7 +397,7 @@ def _consistency_problems(draft: _Body, target: dict, evals: list[dict], run_dat
 # ── 표 재료 (코드가 State 로 만든다)
 
 def _human_reason(text: str) -> str:
-    """판정 이유에서 내부 기록('→ UNKNOWN 강등 (…)', '(코드 판정)')을 빼고 짧은 이유만 남긴다."""
+    """판정 이유에서 내부 기록을 빼고 짧은 이유만 남긴다."""
     if "→ UNKNOWN 강등" in text:
         head = text.split(" → ")[0]
         return next((v for k, v in DEMOTED.items() if head.startswith(k)), re.sub(r"\s*\(.*\)\s*$", "", head))
@@ -429,8 +420,7 @@ COMPANY_DB_HOSTS = ("thevc.kr", "innoforest.co.kr", "crunchbase.com", "nextunico
 
 
 def _other_company_page(s: dict, keys: list[str]) -> bool:
-    """기업 DB 페이지(THE VC·혁신의숲 등)인데 제목이 다른 회사인 경우. 뉴스 목록 속에 이름만 나온 페이지라
-    이 회사의 사실(마일스톤·경력)의 근거로 쓰지 않는다. 예) 메타파머스 마일스톤에 붙었던 'THE VC 비엔에스알' 페이지."""
+    """제목이 다른 회사인 기업 DB 페이지 (이 회사 사실의 근거로 쓰지 않는다)."""
     host = urlparse(s.get("url") or "").netloc.lower().removeprefix("www.")
     if s.get("kind") != "web" or not host.endswith(COMPANY_DB_HOSTS):
         return False
@@ -477,8 +467,7 @@ def _pros_cons(target: dict, reg: SourceRegistry, c2_yes: bool) -> list[list[str
 
 
 def _competitor_rows(target: dict, reg: SourceRegistry, notes: list[CompetitorNote], c2_yes: bool) -> list[list[str]]:
-    """근거 본문에 이름이 실제로 나오는 경쟁사만 표에 남기고(지어낸 경쟁사 차단), 그 근거를 인용으로 붙인다.
-    비교 문장은 보고서 문안(평가표 일치 검사를 거친 것)을 쓰고, C2 가 YES 가 아닌데 남은 우열 표현은 회사 측 주장으로 표시한다."""
+    """근거에 이름이 나오는 경쟁사만 표에 남긴다. C2 가 YES 가 아닌데 남은 우열 표현은 회사 측 주장으로 표시한다."""
     comp = target.get("competition") or {}
     ids = _usable(reg, (comp.get("evidence_ids") or []) + (comp.get("pool_ids") or []))
     texts = {i: norm(reg.text(i)) for i in ids}
@@ -492,7 +481,6 @@ def _competitor_rows(target: dict, reg: SourceRegistry, notes: list[CompetitorNo
             vs = f"(회사 측 주장, 제3자 비교 근거 없음) {vs}"
         offering = c.get("offering") or "-"
         if hit and all(any(k in texts[i] for k in tkeys) for i in hit):
-            # 경쟁사 이름이 대상 회사 기사에만 지나가듯 나오면, 그 경쟁사의 제품 설명은 이 표의 근거로 확인할 수 없다
             offering += " (대상 회사 기사에서 이름만 언급)"
         row = [c["name"], c.get("country") or "-", offering, vs, f"[{', '.join(hit)}]" if hit else ""]
         rows.append(row)
@@ -553,7 +541,7 @@ def _failed_by_company(failed: list[dict], companies: list[list[str]]) -> dict[s
     for q in dict.fromkeys(f.get("query", "") for f in failed):
         who = next((c for a, c in alias if norm(a) in norm(q)), "분야·경쟁사 검색")
         out[who] = out.get(who, 0) + 1
-    return dict(sorted(out.items()))  # 병렬 실행 순서와 관계없이 같은 보고서가 나오게
+    return dict(sorted(out.items()))
 
 
 def _short(r: dict) -> str:
@@ -653,8 +641,7 @@ def _hold_bar(t: float | None) -> str:
 
 
 def _agfunder_id(reg: SourceRegistry, cfg) -> str | None:
-    """ROI 단계별 중앙값의 출처(AgFunder 2026 보고서)를 근거 id 로. 이미 검색된 조각이 있으면 그것을, 없으면 코퍼스 목록의
-    문서 정보로 등록한다(REFERENCE 는 문서 단위로 한 줄)."""
+    """ROI 단계별 중앙값의 출처(AgFunder 2026 보고서) 근거 id."""
     hit = next((sid for sid, s in reg.data.items() if s.get("kind") == "doc" and s.get("doc_id") == "agfunder2026"), None)
     if hit:
         return hit
@@ -697,7 +684,7 @@ def _flip_text(e: dict) -> str:
         ks = sc.get("deal_killers") or []
         return f"Deal-killer {', '.join(ks)} 해소 필요 (배수와 관계없이 보류)" if ks else "-"
     items = "·".join(f.get("items") or [])
-    if f.get("new_multiplier") is None or not items:   # Deal-killer 해소가 먼저이거나, 뒤집을 미확인 문항이 없음
+    if f.get("new_multiplier") is None or not items:
         return f.get("note") or "-"
     after = f"동종 평균 대비 {_s1(f['new_multiplier'])}(기준 {_s100(sc.get('threshold'))})"
     return (f"{items} 이(가) YES 로 확인되면 {after} → 투자 조건 충족" if f.get("reached")
@@ -705,7 +692,7 @@ def _flip_text(e: dict) -> str:
 
 
 def _reference_mix() -> str:
-    """기준 집단의 단계·지역 구성 (Payne 의 '같은 지역·같은 단계 투자 기업' 기준 집단을 근사한 정도를 한계점에 밝힌다)."""
+    """기준 집단의 단계·지역 구성 (한계점에 밝힌다)."""
     from agents.decision import _read_json, _ref_path
 
     data = _read_json(_ref_path()) or {}
@@ -713,7 +700,7 @@ def _reference_mix() -> str:
     if not ms:
         return " (기준 집단 파일이 없어 동종 평균 신호를 0 으로 두었다, 설계 가정)"
 
-    label = {"KR": "국내", "GLOBAL": "해외"}  # 4장 기준 집단 줄과 같은 말로
+    label = {"KR": "국내", "GLOBAL": "해외"}
 
     def mix(key: str) -> str:
         cnt: dict[str, int] = {}
@@ -729,8 +716,7 @@ def _reference_mix() -> str:
 
 def _limitations(cfg, pool: dict, failed_by: dict[str, int], data_limits: list[str], mode: str,
                  access_dates: list[str]) -> list[str]:
-    """한계점: 검색 실패, 미평가 적격 후보, 상대 평가, 가정, 데이터 한계, 판정 모델 순으로 최대 6개 + 조회일 표기 1줄
-    (REFERENCE 는 목록만 싣고, 게시일 대신 조회일을 쓴 사실은 여기서 밝힌다)."""
+    """한계점: 검색 실패, 미평가 적격 후보, 상대 평가, 가정, 데이터 한계, 판정 모델 순으로 최대 6개 + 조회일 표기 1줄."""
     out = []
     if gap := pool.get("ref_gap"):
         out.append(f"이번에 평가한 {pool['evaluated']}곳 중 {len(gap['unseen'])}곳({'·'.join(gap['unseen'])})은 동종 기준 집단"
@@ -797,7 +783,7 @@ def _renumber(view: dict, reg: SourceRegistry) -> tuple[dict, list[dict], list[s
         g["keys"].add(k)
         if tk:
             g["titles"].append(tk)
-    groups.sort(key=lambda g: GROUPS.index(reference_group(g["srcs"][0])))  # 안정 정렬: 유형 안에서는 인용 순서 유지
+    groups.sort(key=lambda g: GROUPS.index(reference_group(g["srcs"][0])))
     num, refs = {}, []
     for n, g in enumerate(groups, 1):
         num.update({sid: n for sid in g["ids"]})
@@ -925,7 +911,7 @@ def _team_blocks(target: dict, d: dict, reg: SourceRegistry, detail: bool) -> li
 
 
 def _evaluated_blocks(evals: list[dict], target: dict) -> list[dict]:
-    """평가한 후보 전체(배수 순)와 대상 선정 방법 — 첫 투자 추천에서 멈추지 않고 비교해 고른 근거를 보인다."""
+    """평가한 후보 전체(배수 순)와 대상 선정 방법."""
     ranked = sorted(evals, key=lambda e: -e["scorecard"]["multiplier"])
     rows = [[i, e["name"] + (" (대상)" if e is target else ""),
              f"{e.get('stage') or (e.get('profile') or {}).get('stage') or '-'} · {'국내' if e.get('region') == 'KR' else '해외'}",
@@ -976,9 +962,9 @@ def _candidate_blocks(evals: list[dict], notes: list[CandidateNote], reg: Source
         no_ids = _usable(reg, [x for r in rows if r["answer"] == "NO" for x in r.get("evidence_ids") or []])
         if note:
             why = note.why_not
-            if no_ids and not CITE.search(why):  # 반대 근거가 있는데 번호를 빠뜨리면 코드가 그 근거를 붙인다
+            if no_ids and not CITE.search(why):
                 why = f"{why.rstrip('.')}. 반대 근거 [{', '.join(no_ids[:3])}]"
-            if note.business and re.search(r"[가-힣]", note.business):  # 영어 원문 요약 대신 한국어 한 줄
+            if note.business and re.search(r"[가-힣]", note.business):
                 one_line = note.business
         else:
             no = [_short(r) for r in rows if r["answer"] == "NO"]
@@ -1008,7 +994,7 @@ def _chapters_hold(evals: list[dict], target: dict, d: dict, t: dict, reg: Sourc
         pool_blocks.append(_note(f"미평가 적격 후보 {len(un)}곳 ({pool['why']}): " + ", ".join(
             f"{u['name']}({u['stage']}{', 관문 검색 실패' if u['search_failed'] else ''})" for u in un)))
     ht = target.get("hold_type") or sc.get("hold_type")
-    top_why = (f"기준 {_s100(thr)}을 넘지 못했다" if sc["multiplier"] <= thr   # 투자 ⇔ 배수 > 기준 (같으면 보류)
+    top_why = (f"기준 {_s100(thr)}을 넘지 못했다" if sc["multiplier"] <= thr
                else f"배수 기준은 넘었지만 보류 유형 '{ht}'에 해당한다")
     detail = [{"t": "h3", "text": B_DETAIL[0]}] + _idea_blocks(target, d, reg, c2_yes, t["notes"], with_competition=False)
     detail += [{"t": "h3", "text": B_DETAIL[1]}] + _market_blocks(target, d, reg)
@@ -1081,7 +1067,7 @@ def _to_markdown(v: dict) -> str:
 # ── 형식 검사 (렌더링한 md·REFERENCE·평가 결과로)
 
 def _assumption_scope(md: str) -> list[str]:
-    """'가정' 표기를 검사할 줄: 코드가 만든 ROI 참고치 상자와 한계점 장 (다른 곳의 '환율' 언급은 시장 자료 인용일 수 있다)."""
+    """'가정' 표기를 검사할 줄: ROI 참고치 상자와 한계점 장."""
     out, in_roi, in_lim = [], False, False
     for ln in md.splitlines():
         if ln.startswith("## "):
@@ -1206,14 +1192,11 @@ def _finish(view: dict, md: str, result: dict, cfg, checks: dict, mode: str, cit
     md_path = out_dir / "investment_report.md"
     md_path.write_text(md, encoding="utf-8")
     submit_pdf = None
-    if not cfg.report.get("scenario"):  # 시나리오 실행(--out)은 제출용 파일을 만들지 않는다
+    if not cfg.report.get("scenario"):
         shutil.copyfile(pdf_path, submit)
         submit_pdf = str(submit)
     checks = {"pages": result["pages"], "max_pages": cfg.report.max_pages, "pages_ok": result["pages"] <= cfg.report.max_pages,
               "summary_ratio": result["summary_ratio"], "summary_ok": result["summary_ratio"] <= 0.5, **checks}
-    # v1 이름 (v1 README 생성기 docs/README.md.j2 가 읽는다. README 를 v2 키로 바꾸면 지워도 된다)
-    checks |= {"summary_ratio_of_a4": checks["summary_ratio"],
-               "scorecard_consistency_violations": checks.get("consistency_violations", [])}
     bad = [k for k, v in checks.items() if (k.endswith("_ok") or k in ("refs_match_citations", "conclusion_matches_scorecard",
                                                                         "assumptions_labeled")) and v is False]
     msg = (f"[보고서] {mode} {pdf_path.name} {result['pages']}쪽 (≤{cfg.report.max_pages}), SUMMARY A4 대비 "
@@ -1231,7 +1214,7 @@ def _finish(view: dict, md: str, result: dict, cfg, checks: dict, mode: str, cit
 
 def report_node(state: dict) -> dict:
     cfg = get_config()
-    if cfg.workflow.get("calibrate"):  # 보정 실행: 기준 집단만 만들고 보고서는 쓰지 않는다 (그래프 간선은 본 실행과 같다)
+    if cfg.workflow.get("calibrate"):  # 보정 실행: 보고서는 쓰지 않는다
         msg = "[보고서] 보정 실행 — 렌더링하지 않음 (기준 집단은 app.py 가 evaluations 로 기록)"
         print(msg)
         return {"report": {"mode": "calibrate", "md": None, "html": None, "pdf": None, "submit_pdf": None, "checks": {}},
@@ -1242,7 +1225,7 @@ def report_node(state: dict) -> dict:
     run_date = state.get("run_date") or datetime.now().strftime("%Y-%m-%d")
     if not evals:
         return _no_candidate_report(state, cfg, screened, reg, run_date)
-    invested, ranked, target = _pick_target(evals)  # 투자 기준 통과 후보 중 배수 1위
+    invested, ranked, target = _pick_target(evals)
     mode = "invest" if invested else "hold"
     prof, sc = target.get("profile") or {}, target["scorecard"]
     pool = _pool(state, evals, screened, cfg)
@@ -1254,7 +1237,7 @@ def report_node(state: dict) -> dict:
     seg = get_segment(target.get("segment_id") or prof.get("segment_id") or "")["name"]
     un = pool["unevaluated"]
 
-    # 결론·상황·요청 줄은 코드가 평가 결과로 쓴다 (LLM 이 바꿀 수 없음)
+    # 결론·상황·요청 줄은 코드가 쓴다
     if mode == "invest":
         rank = sc.get("target_rank")
         peer = f"동종 {sc.get('peer_n')}곳 중 {rank}위" if rank else f"기준 집단 {(sc.get('reference') or {}).get('n', 0)}곳"
@@ -1299,7 +1282,6 @@ def report_node(state: dict) -> dict:
                 ("재검토", f"가장 가까운 후보 {target['name']}: {_flip_text(target)}(→2장)"), ("요청", request)]
 
     # 1) 초안 → SUMMARY 규칙 + 평가표 일치 검사. 어긋나면 이유를 붙여 다시 쓴다
-    #    (재작성 상한은 분량 초과 때의 축약 재작성과 같은 report.max_rewrites 를 쓴다)
     max_rw = int(cfg.report.get("max_rewrites", 2))
     draft, feedback, probs, rewrites = None, "", [], 0
     for attempt in range(max_rw + 1):
@@ -1327,7 +1309,7 @@ def report_node(state: dict) -> dict:
              "cands": getattr(draft, "candidates", []), "limitations": []}
         view = {"title": title, "badge": badge, "mode": mode, "meta": meta, "run_date": run_date,
                 "summary": summary(draft), "chapters": []}
-        # 한계점의 조회일 건수는 REFERENCE 를 만든 뒤에 알 수 있어 두 번 번호를 매긴다 (인용은 한계점에 없다)
+        # 한계점의 조회일 건수를 알려고 두 번 번호를 매긴다
         view["chapters"] = (_chapters_invest(target, d, t, reg, cfg, pool, evals) if mode == "invest"
                             else _chapters_hold(ranked, target, d, t, reg, cfg, pool, failed_by))
         _, refs0, _ = _renumber(view, reg)

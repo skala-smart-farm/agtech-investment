@@ -1,19 +1,8 @@
-"""🔭 스타트업 발굴 에이전트.
+"""스타트업 발굴 에이전트.
 
-창업자 검색(링크드인 등)은 사람을 찾는 방법이지, 회사의 창업 시기·투자 단계를 알려 주지 않는다.
-그래서 "투자 단계가 드러나는 공개 신호"가 생기는 채널에서 후보를 모은다.
-
-  T. TIPS 공개 목록   : 운영사가 먼저 투자해야 선정되므로 "Seed 급 투자 이력"이 보장된 회사 목록 (대표자·설립일·선정연도 필드)
-  W. 투자 기사 피드   : 와우테일 애그테크 카테고리의 투자 유치 기사 (정확한 게시일)
-  A. 투자 유치 뉴스   : 라운드(시드·시리즈) 자체가 기사화된다 → 단계·시점이 함께 잡힌다
-  B. 공공 프로그램    : 농식품 A-벤처스·스마트농업 우수기업 등 선정 기사 → 초기 기업이 모인다
-  C. 스타트업 DB      : THE VC·혁신의숲 기업 페이지 → 설립일·투자 단계가 구조화되어 있다
-  D. 수상·전시        : CES 혁신상, 농업기술 창업경진대회 → 기술력 있는 초기 기업
-  E. 문서(RAG)       : 코퍼스 보고서의 스타트업 사례·투자 동향
-  F. 해외 투자 뉴스   : 해외 라운드 기사 (과제: 국내외 스타트업 조사)
-
-여러 채널에서 동시에 잡힌 후보일수록(교차 신호) 실재하고 활발한 기업일 가능성이 높아 우선순위를 올린다.
-검증 슬롯은 지역별 몫(workflow.screen_kr·screen_global)으로 나눠, 해외 후보가 국내 뒤로 밀려 검증되지 못하는 일을 막는다.
+투자 단계가 드러나는 공개 채널에서 후보를 모은다:
+TIPS 목록, 와우테일 투자 기사, 투자 유치 뉴스, 공공 프로그램 선정, 스타트업 DB, 수상·전시, 문서(RAG), 해외 투자 뉴스.
+여러 채널에서 잡힌 후보(교차 신호)를 우선하고, 검증 슬롯은 국내·해외 몫으로 나눈다.
 """
 from __future__ import annotations
 
@@ -75,8 +64,7 @@ def _channel_queries(cfg, round_no: int) -> list[tuple[str, str, dict]]:
 
 
 def _tips_evidence(t: dict) -> dict:
-    """TIPS 목록 한 행 → 웹 근거. 설립일은 연도만 적는다: 본문의 'YYYY-MM-DD' 는 근거 저장소가 게시일로 읽기 때문
-    (tools/sources.py _date_from). 정확한 설립일은 적격성 에이전트가 TIPS 스냅샷에서 따로 기록한다(founded_date)."""
+    """TIPS 목록 한 행 → 웹 근거 (설립일은 게시일로 오인되지 않게 연도만 적는다)."""
     founded = str(t.get("founded") or "")[:4]
     return {"url": "https://jointips.or.kr/network/startups", "title": f"TIPS 창업기업: {t['name']}",
             "content": f"{t['name']} — 대표 {t.get('ceo') or '미상'}, 설립 {founded + '년' if founded else '미상'}, "
@@ -93,10 +81,10 @@ def discovery_node(state: dict) -> dict:
         ids = web_search(query, reg, AGENT, **opt)
         by_channel.setdefault(channel, []).extend(ids)
 
-    if round_no == 1:  # 구조화 채널: 무료·결정적이라 먼저 쓴다
+    if round_no == 1:  # 구조화 채널 먼저
         for t in sorted(tips_agtech(), key=lambda x: -x["sel_year"])[:40]:
             sid = reg.add_web(_tips_evidence(t), AGENT, "TIPS 공개 목록", today(), key=f"tips:{t['name']}")
-            reg.data[sid].update(date=None, date_is_access=True)  # 목록 행이라 게시일이 없다 (소개문 속 날짜를 게시일로 쓰지 않게)
+            reg.data[sid].update(date=None, date_is_access=True)  # 목록 행이라 게시일 없음
             by_channel.setdefault("T.TIPS선정", []).append(sid)
         for w in wowtale_agtech_funding():
             sid = reg.add_web({"url": w["url"], "title": w["title"], "content": w["title"],
@@ -120,8 +108,8 @@ def discovery_node(state: dict) -> dict:
     seg_list = "\n".join(f"- {s['id']}: {s['name']}" for s in cfg.domain.segments)
     extractor = structured(FoundList)
     found: dict[str, dict] = {}
-    en_key: dict[str, str] = {}  # 영문명 → 후보 키: 표기만 다른 같은 회사를 하나로 (예: 오차드 로보틱스 = Orchard Robotics)
-    for i in range(0, len(all_ids), 12):  # 근거 12개씩 나눠 추출 (긴 입력에서 누락 방지)
+    en_key: dict[str, str] = {}  # 영문명 → 후보 키 (표기만 다른 같은 회사 합치기)
+    for i in range(0, len(all_ids), 12):  # 근거 12개씩 나눠 추출
         batch = all_ids[i:i + 12]
         res: FoundList = extractor.invoke(render("discovery_extract", domain=cfg.domain.description,
                                                  segments=seg_list, evidence=reg.brief(batch, 700)))
@@ -133,7 +121,6 @@ def discovery_node(state: dict) -> dict:
             if not key or not valid:
                 continue
             key = en_key.setdefault(alias, key) if alias else key
-            # 한글 이름만으로는 판단하지 않는다(해외 기업을 한글로 적은 기사도 있음). 지역 값의 한국 표기만 KR 로 맞춘다
             region = "KR" if c.region.strip().upper() in ("KR", "KOREA", "SOUTH KOREA", "한국", "국내") else "GLOBAL"
             item = found.setdefault(key, {"name": c.name, "name_en": c.name_en, "region": region,
                                           "segment_id": get_segment(c.segment_id)["id"], "what": c.what,
@@ -148,7 +135,7 @@ def discovery_node(state: dict) -> dict:
              if k not in seen and normalize(v["name_en"]) not in seen]
     # 교차 신호(채널 수)와 근거량으로 검증 순서를 정한다
     cands.sort(key=lambda c: (region_rank.get(c["region"], 9), -(2 * len(c["channels"]) + min(len(c["evidence_ids"]), 6))))
-    # 같은 지역 안의 순위는 두고, 검증 슬롯을 지역별 몫으로 나눈다 (국내를 통째로 앞에 두면 해외 후보가 검증에 오지 못함)
+    # 검증 슬롯을 지역별 몫으로 나눈다
     cands = region_quota_order(cands)
     n = cfg.workflow.max_candidates_per_round
     n_kr = sum(c["region"] == "KR" for c in cands)

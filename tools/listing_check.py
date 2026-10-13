@@ -1,8 +1,4 @@
-"""비상장 여부의 결정적(deterministic) 확인.
-
-LLM 판단에만 맡기지 않고, 한국거래소(KOSPI·KOSDAQ·KONEX) 상장 종목 목록과 이름을 직접 대조한다.
-해외 기업은 거래소 목록 대조가 어렵기 때문에 뉴스 근거(IPO·인수 보도)를 적격성 에이전트가 판정한다.
-"""
+"""비상장 여부 확인: 한국거래소 상장 종목 목록과 이름을 직접 대조한다 (해외 기업은 적격성 에이전트가 뉴스로 판정)."""
 from __future__ import annotations
 
 import re
@@ -42,7 +38,7 @@ def _fdr_listing() -> pd.DataFrame:
 
 @lru_cache(maxsize=1)
 def _krx_names() -> set[str]:
-    """KIND 목록을 기본으로, 실패하면 FinanceDataReader 로 대체. 스냅샷은 날짜별로 저장해 판정 근거로 남긴다."""
+    """KIND 목록, 실패하면 FinanceDataReader. 날짜별 스냅샷으로 저장한다."""
     d = path(f"{get_config().cache.dir}/snapshots/.keep").parent
     old = sorted(d.glob("krx_listing_*.csv"))
     f = old[-1] if old else d / f"krx_listing_{datetime.now():%Y%m%d}.csv"
@@ -64,7 +60,7 @@ def _krx_names() -> set[str]:
 
 
 def is_krx_listed(name: str, aliases: list[str] | None = None) -> bool | None:
-    """True=상장, False=목록에 없음, None=목록을 불러오지 못함 (호출 쪽에서 통과시키지 않는다: fail-closed)."""
+    """True=상장, False=목록에 없음, None=목록을 불러오지 못함."""
     try:
         names = _krx_names()
     except Exception:

@@ -32,8 +32,7 @@ def get_config(path: str | None = None) -> Config:
 
 
 def require_keys() -> None:
-    """API 키는 실제로 API 를 부를 때만 필요하다 (재현용 캐시만으로 실행할 때는 없어도 된다).
-    검색 키는 Serper·Tavily 중 하나만 있어도 된다."""
+    """API 를 새로 부를 때 필요한 키 확인. 검색 키는 Serper·Tavily 중 하나면 된다."""
     missing = [] if os.getenv("OPENAI_API_KEY") else ["OPENAI_API_KEY"]
     if not any(os.getenv(k) for k in ("SERPER_API_KEY", "TAVILY_API_KEY")):
         missing.append("검색 키(SERPER_API_KEY 또는 TAVILY_API_KEY)")
@@ -42,7 +41,7 @@ def require_keys() -> None:
 
 
 def run_date() -> str:
-    """평가 기준일. 재현용 캐시(replay/run_meta.json)가 있으면 그 날짜로 고정해 24개월 판정·조회일이 달라지지 않게 한다."""
+    """평가 기준일. 캐시 폴더에 run_meta.json 이 있으면 그 날짜, 없으면 오늘."""
     import json
     from datetime import datetime
 
